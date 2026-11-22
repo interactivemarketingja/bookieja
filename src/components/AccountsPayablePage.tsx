@@ -2,38 +2,37 @@ import { useState, useEffect } from 'react';
 import { motion } from 'motion/react';
 import { 
   Receipt, 
-  Clock, 
   AlertCircle, 
   CheckCircle2,
   Calendar,
   Search,
-  Filter,
-  ArrowDownRight,
-  Store,
-  DollarSign
+  Store
 } from 'lucide-react';
 import { dataService } from '../services/dataService';
 import { Expense } from '../types';
-import { cn, formatCurrency } from '../lib/utils';
+import { cn, formatCurrency, parseLocalDate, formatLocalDate } from '../lib/utils';
 
 export function AccountsPayablePage() {
   const [expenses, setExpenses] = useState<Expense[]>([]);
   const [searchTerm, setSearchTerm] = useState('');
-  const [isLoading, setIsLoading] = useState(true);
+  const [statusFilter, setStatusFilter] = useState<'All' | 'Overdue' | 'Pending'>('All');
+
+  const fetchData = () => {
+    const data = dataService.getExpenses();
+    setExpenses(data.filter(exp => exp.status !== 'Paid' && exp.due_date));
+  };
 
   useEffect(() => {
-    const data = dataService.getExpenses();
-    // Filter for unpaid or pending expenses that have a due date (representing bills)
-    setExpenses(data.filter(exp => exp.status !== 'Paid' && exp.due_date));
-    setIsLoading(false);
+    fetchData();
+    window.addEventListener('island-data-synced', fetchData);
+    return () => window.removeEventListener('island-data-synced', fetchData);
   }, []);
 
   const calculateAging = (dueDate: string) => {
-    const today = new Date();
-    const due = new Date(dueDate);
-    const diffTime = today.getTime() - due.getTime();
-    const diffDays = Math.ceil(diffTime / (1000 * 60 * 60 * 24));
-    return diffDays;
+    const todayLocal = parseLocalDate(formatLocalDate());
+    const due = parseLocalDate(dueDate);
+    const diffTime = todayLocal.getTime() - due.getTime();
+    return Math.round(diffTime / (1000 * 60 * 60 * 24));
   };
 
   const getAgingCategory = (days: number) => {
@@ -54,10 +53,18 @@ export function AccountsPayablePage() {
 
   const totalAP = Object.values(agingData).reduce((a, b) => a + b, 0);
 
-  const filteredExpenses = expenses.filter(exp => 
-    exp.description?.toLowerCase().includes(searchTerm.toLowerCase()) ||
-    exp.category.toLowerCase().includes(searchTerm.toLowerCase())
-  );
+  const filteredExpenses = expenses.filter(exp => {
+    const q = searchTerm.toLowerCase();
+    const matchesSearch = (exp.description || '').toLowerCase().includes(q) ||
+      (exp.category || '').toLowerCase().includes(q);
+    const days = exp.due_date ? calculateAging(exp.due_date) : 0;
+    const isOverdue = exp.status === 'Overdue' || days > 0;
+    const matchesFilter =
+      statusFilter === 'All' ||
+      (statusFilter === 'Overdue' && isOverdue) ||
+      (statusFilter === 'Pending' && !isOverdue);
+    return matchesSearch && matchesFilter;
+  });
 
   const categories = ['Current', '1-30 Days', '31-60 Days', '61-90 Days', '90+ Days'];
 
@@ -103,10 +110,15 @@ export function AccountsPayablePage() {
             />
           </div>
           <div className="flex gap-2 w-full md:w-auto">
-            <button className="flex-1 md:flex-none flex items-center justify-center gap-2 px-6 py-3 bg-white border border-slate-200 rounded-2xl text-sm font-bold text-slate-600 hover:bg-slate-50 transition-all">
-              <Filter size={18} />
-              Filter
-            </button>
+            <select
+              value={statusFilter}
+              onChange={(e) => setStatusFilter(e.target.value as any)}
+              className="px-6 py-3 bg-white border border-slate-200 rounded-2xl text-sm font-bold text-slate-600 hover:bg-slate-50 transition-all focus:outline-none focus:ring-2 focus:ring-brand-500/20"
+            >
+              <option value="All">All Payables</option>
+              <option value="Overdue">Overdue Only</option>
+              <option value="Pending">Current / Pending</option>
+            </select>
           </div>
         </div>
 

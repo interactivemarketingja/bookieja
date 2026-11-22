@@ -4,7 +4,6 @@ import {
   Users, 
   Plus, 
   Search, 
-  Filter, 
   Edit2, 
   Trash2, 
   X, 
@@ -13,8 +12,6 @@ import {
   Phone, 
   MapPin, 
   Building2, 
-  MoreVertical,
-  ExternalLink,
   Calendar,
   FileDown
 } from 'lucide-react';
@@ -28,6 +25,7 @@ import autoTable from 'jspdf-autotable';
 export function ClientsPage({ onEdit }: { onEdit: (client: Client) => void }) {
   const [clients, setClients] = useState<Client[]>([]);
   const [searchQuery, setSearchQuery] = useState('');
+  const [clientFilter, setClientFilter] = useState<'All' | 'WithEmail' | 'WithCompany'>('All');
   const [isLoading, setIsLoading] = useState(true);
   const [isDeleteConfirmOpen, setIsDeleteConfirmOpen] = useState(false);
   const [clientToDelete, setClientToDelete] = useState<string | null>(null);
@@ -57,15 +55,6 @@ export function ClientsPage({ onEdit }: { onEdit: (client: Client) => void }) {
     setSelectedClient(client);
   };
 
-  const handleSave = (client: Client) => {
-    try {
-      dataService.saveClient(client);
-      fetchData();
-    } catch (error) {
-      console.error('Failed to save client:', error);
-    }
-  };
-
   const handleDelete = (id: string) => {
     setClientToDelete(id);
     setIsDeleteConfirmOpen(true);
@@ -83,11 +72,17 @@ export function ClientsPage({ onEdit }: { onEdit: (client: Client) => void }) {
     }
   };
 
-  const filteredClients = clients.filter(client => 
-    client.name.toLowerCase().includes(searchQuery.toLowerCase()) ||
-    client.company?.toLowerCase().includes(searchQuery.toLowerCase()) ||
-    client.email?.toLowerCase().includes(searchQuery.toLowerCase())
-  );
+  const filteredClients = clients.filter(client => {
+    const q = searchQuery.toLowerCase();
+    const matchesSearch = (client.name || '').toLowerCase().includes(q) ||
+      (client.company || '').toLowerCase().includes(q) ||
+      (client.email || '').toLowerCase().includes(q);
+    const matchesFilter =
+      clientFilter === 'All' ||
+      (clientFilter === 'WithEmail' && Boolean(client.email?.trim())) ||
+      (clientFilter === 'WithCompany' && Boolean(client.company?.trim()));
+    return matchesSearch && matchesFilter;
+  });
 
   return (
     <motion.div
@@ -107,10 +102,15 @@ export function ClientsPage({ onEdit }: { onEdit: (client: Client) => void }) {
             className="w-full pl-12 pr-4 py-4 bg-white border border-slate-200 rounded-2xl text-sm font-bold focus:outline-none focus:ring-4 focus:ring-brand-500/10 transition-all shadow-sm"
           />
         </div>
-        <button className="flex items-center justify-center gap-2 px-6 py-4 bg-white border border-slate-200 text-slate-600 rounded-2xl font-black uppercase tracking-widest hover:bg-slate-50 transition-all shadow-sm">
-          <Filter size={20} />
-          Filters
-        </button>
+        <select
+          value={clientFilter}
+          onChange={(e) => setClientFilter(e.target.value as any)}
+          className="px-6 py-4 bg-white border border-slate-200 text-slate-600 rounded-2xl font-black uppercase tracking-widest text-xs hover:bg-slate-50 transition-all shadow-sm focus:outline-none focus:ring-4 focus:ring-brand-500/10"
+        >
+          <option value="All">All Clients</option>
+          <option value="WithEmail">With Email</option>
+          <option value="WithCompany">With Company</option>
+        </select>
       </div>
 
       {/* Clients Grid/Table */}
@@ -159,7 +159,7 @@ export function ClientsPage({ onEdit }: { onEdit: (client: Client) => void }) {
                     <td className="px-6 py-6">
                       <div className="flex items-center gap-4">
                         <div className="w-12 h-12 rounded-2xl bg-brand-50 text-brand-600 flex items-center justify-center font-black text-lg shadow-sm">
-                          {client.name.charAt(0)}
+                          {(client.name || '?').charAt(0)}
                         </div>
                         <div>
                           <p className="text-sm text-jamaica-black font-black tracking-tight">{client.name}</p>
@@ -295,8 +295,13 @@ function ClientDetailPanel({ isOpen, onClose, client, invoices }: ClientDetailPa
 
     // Summary Box
     const totalInvoiced = invoices.reduce((sum, inv) => sum + inv.amount + (inv.tax_amount || 0), 0);
-    const totalPaid = invoices.filter(inv => inv.status === 'Paid').reduce((sum, inv) => sum + inv.amount + (inv.tax_amount || 0), 0);
-    const balanceDue = totalInvoiced - totalPaid;
+    const totalPaid = invoices.reduce((sum, inv) => {
+      const invTotal = inv.amount + (inv.tax_amount || 0);
+      if (inv.status === 'Paid') return sum + invTotal;
+      const partialPaid = (inv.payment_history || []).reduce((pSum, p) => pSum + p.amount, 0);
+      return sum + Math.min(invTotal, partialPaid);
+    }, 0);
+    const balanceDue = Math.max(0, totalInvoiced - totalPaid);
 
     doc.setFillColor(248, 250, 252);
     doc.roundedRect(120, 45, 75, 30, 3, 3, 'F');
@@ -455,7 +460,7 @@ function ClientDetailPanel({ isOpen, onClose, client, invoices }: ClientDetailPa
                           </div>
                         </div>
                         <div className="text-right">
-                          <p className="text-sm font-black text-jamaica-black">${invoice.amount.toLocaleString()}</p>
+                          <p className="text-sm font-black text-jamaica-black">{formatCurrency(invoice.amount + (invoice.tax_amount || 0))}</p>
                           <div className={cn(
                             "text-[8px] font-black uppercase tracking-widest mt-0.5",
                             invoice.status === 'Paid' ? "text-emerald-500" :

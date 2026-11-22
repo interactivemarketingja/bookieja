@@ -11,6 +11,16 @@ import {
   JournalLine,
 } from "../types";
 import { supabase, isSupabaseConfigured } from "../lib/supabase";
+import { parseLocalDate, formatLocalDate } from "../lib/utils";
+
+function safeParseJSON<T>(raw: string | null, fallback: T): T {
+  if (!raw) return fallback;
+  try {
+    return JSON.parse(raw) as T;
+  } catch {
+    return fallback;
+  }
+}
 
 const STORAGE_KEYS = {
   TRANSACTIONS: "island_transactions",
@@ -415,8 +425,7 @@ export const dataService = {
   },
 
   getTransactions: (): DataRecord[] => {
-    const data = localStorage.getItem(STORAGE_KEYS.TRANSACTIONS);
-    return data ? JSON.parse(data) : [];
+    return safeParseJSON<DataRecord[]>(localStorage.getItem(STORAGE_KEYS.TRANSACTIONS), []);
   },
 
   saveTransaction: (transaction: DataRecord): void => {
@@ -454,7 +463,7 @@ export const dataService = {
       localStorage.setItem(STORAGE_KEYS.CATEGORIES, JSON.stringify(DEFAULT_CATEGORIES));
       return DEFAULT_CATEGORIES;
     }
-    return JSON.parse(data);
+    return safeParseJSON<BudgetCategory[]>(data, DEFAULT_CATEGORIES);
   },
 
   saveCategory: (category: BudgetCategory): void => {
@@ -493,8 +502,7 @@ export const dataService = {
   },
 
   getBudgets: (): Budget[] => {
-    const data = localStorage.getItem(STORAGE_KEYS.BUDGETS);
-    return data ? JSON.parse(data) : [];
+    return safeParseJSON<Budget[]>(localStorage.getItem(STORAGE_KEYS.BUDGETS), []);
   },
 
   saveBudget: (budget: Budget): void => {
@@ -533,8 +541,7 @@ export const dataService = {
   },
 
   getInvoices: (): Invoice[] => {
-    const data = localStorage.getItem(STORAGE_KEYS.INVOICES);
-    return data ? JSON.parse(data) : [];
+    return safeParseJSON<Invoice[]>(localStorage.getItem(STORAGE_KEYS.INVOICES), []);
   },
 
   saveInvoice: (invoice: Invoice): void => {
@@ -600,8 +607,7 @@ export const dataService = {
   },
 
   getExpenses: (): Expense[] => {
-    const data = localStorage.getItem(STORAGE_KEYS.EXPENSES);
-    return data ? JSON.parse(data) : [];
+    return safeParseJSON<Expense[]>(localStorage.getItem(STORAGE_KEYS.EXPENSES), []);
   },
 
   saveExpense: (expense: Expense): void => {
@@ -627,12 +633,12 @@ export const dataService = {
 
       if (!oldExpense || settingsChanged) {
         if (oldExpense?.recurring_id) {
-          const now = new Date();
+          const today = parseLocalDate(formatLocalDate());
           const kept: Expense[] = [];
           for (const e of expenses) {
             const shouldKeep =
               e.recurring_id !== oldExpense.recurring_id ||
-              new Date(e.date) <= now ||
+              parseLocalDate(e.date) <= today ||
               e.id === updatedExpense.id;
             if (shouldKeep) kept.push(e);
             else deletedIds.push(e.id);
@@ -650,12 +656,12 @@ export const dataService = {
         expenses.push(...futureExpenses);
       }
     } else if (oldExpense?.is_recurring) {
-      const now = new Date();
+      const today = parseLocalDate(formatLocalDate());
       const kept: Expense[] = [];
       for (const e of expenses) {
         const shouldKeep =
           e.recurring_id !== oldExpense.recurring_id ||
-          new Date(e.date) <= now ||
+          parseLocalDate(e.date) <= today ||
           e.id === updatedExpense.id;
         if (shouldKeep) kept.push(e);
         else deletedIds.push(e.id);
@@ -701,56 +707,67 @@ export const dataService = {
 
   generateFutureExpenses: (baseExpense: Expense): Expense[] => {
     const futureExpenses: Expense[] = [];
-    const startDate = new Date(baseExpense.date);
+    const startDate = parseLocalDate(baseExpense.date);
+    if (Number.isNaN(startDate.getTime())) return futureExpenses;
+
+    const frequency = baseExpense.frequency || "Monthly";
     let occurrences = 0;
-    let endDate: Date | null = null;
+    let endDate: Date;
 
     if (baseExpense.end_date) {
-      endDate = new Date(baseExpense.end_date);
+      endDate = parseLocalDate(baseExpense.end_date);
     } else if (baseExpense.duration_months) {
-      endDate = new Date(startDate);
-      endDate.setMonth(startDate.getMonth() + baseExpense.duration_months);
+      endDate = new Date(startDate.getFullYear(), startDate.getMonth() + baseExpense.duration_months, startDate.getDate());
     } else {
-      endDate = new Date(startDate);
-      endDate.setMonth(startDate.getMonth() + 12);
+      endDate = new Date(startDate.getFullYear(), startDate.getMonth() + 12, startDate.getDate());
     }
 
-    let currentDate = new Date(startDate);
+    if (Number.isNaN(endDate.getTime()) || endDate <= startDate) {
+      return futureExpenses;
+    }
 
-    const incrementDate = (date: Date, frequency: string) => {
-      const next = new Date(date);
-      if (frequency === "Daily") next.setDate(next.getDate() + 1);
-      else if (frequency === "Weekly") next.setDate(next.getDate() + 7);
-      else if (frequency === "Monthly") {
-        const currentMonth = next.getMonth();
-        next.setMonth(currentMonth + 1);
-        if (next.getMonth() !== (currentMonth + 1) % 12) {
-          next.setDate(0);
-        }
-      } else if (frequency === "Yearly") next.setFullYear(next.getFullYear() + 1);
+    const dueOffsetDays = baseExpense.due_date
+      ? Math.round((parseLocalDate(baseExpense.due_date).getTime() - startDate.getTime()) / (1000 * 60 * 60 * 24))
+      : null;
+
+    const incrementDate = (date: Date, freq: string) => {
+      if (freq === "Daily") {
+        return new Date(date.getFullYear(), date.getMonth(), date.getDate() + 1);
+      }
+      if (freq === "Weekly") {
+        return new Date(date.getFullYear(), date.getMonth(), date.getDate() + 7);
+      }
+      if (freq === "Yearly") {
+        return new Date(date.getFullYear() + 1, date.getMonth(), date.getDate());
+      }
+      // Monthly (default): clamp to last day of target month
+      const targetMonth = date.getMonth() + 1;
+      const next = new Date(date.getFullYear(), targetMonth, date.getDate());
+      if (next.getMonth() !== targetMonth % 12) {
+        return new Date(date.getFullYear(), targetMonth + 1, 0);
+      }
       return next;
     };
 
-    currentDate = incrementDate(currentDate, baseExpense.frequency!);
+    let currentDate = incrementDate(startDate, frequency);
 
     while (currentDate <= endDate) {
+      const dueDateObj =
+        dueOffsetDays !== null && !Number.isNaN(dueOffsetDays)
+          ? new Date(currentDate.getFullYear(), currentDate.getMonth(), currentDate.getDate() + dueOffsetDays)
+          : null;
+
       futureExpenses.push({
         ...baseExpense,
         id: `EXP-REC-${Math.random().toString(36).substr(2, 9)}`,
-        date: currentDate.toISOString().split("T")[0],
-        due_date: baseExpense.due_date
-          ? new Date(
-              currentDate.getTime() + (new Date(baseExpense.due_date).getTime() - startDate.getTime())
-            )
-              .toISOString()
-              .split("T")[0]
-          : undefined,
+        date: formatLocalDate(currentDate),
+        due_date: dueDateObj ? formatLocalDate(dueDateObj) : undefined,
         status: "Pending",
         is_recurring: false,
         recurring_id: baseExpense.recurring_id,
       });
 
-      currentDate = incrementDate(currentDate, baseExpense.frequency!);
+      currentDate = incrementDate(currentDate, frequency);
       occurrences++;
 
       if (occurrences > 1825) break;
@@ -800,8 +817,7 @@ export const dataService = {
   },
 
   getClients: (): Client[] => {
-    const data = localStorage.getItem(STORAGE_KEYS.CLIENTS);
-    return data ? JSON.parse(data) : [];
+    return safeParseJSON<Client[]>(localStorage.getItem(STORAGE_KEYS.CLIENTS), []);
   },
 
   saveClient: (client: Client): void => {
@@ -845,36 +861,69 @@ export const dataService = {
   },
 
   getSettings: () => {
-    const data = localStorage.getItem(STORAGE_KEYS.SETTINGS);
-    return data ? JSON.parse(data) : { tax_rate: 15, currency: "USD", invoice_prefix: "INV-" };
+    const defaults = {
+      tax_rate: 15,
+      currency: "USD",
+      invoice_prefix: "INV-",
+      notifications: {
+        emailAlerts: true,
+        pushNotifications: false,
+        weeklyReports: true,
+        securityAlerts: true,
+      },
+    };
+    const parsed = safeParseJSON<any>(localStorage.getItem(STORAGE_KEYS.SETTINGS), {});
+    return {
+      ...defaults,
+      ...parsed,
+      notifications: {
+        ...defaults.notifications,
+        ...(parsed?.notifications || {}),
+      },
+    };
   },
 
   saveSettings: (settings: any) => {
-    const merged = { ...dataService.getSettings(), ...settings };
+    const current = dataService.getSettings();
+    const merged = {
+      ...current,
+      ...settings,
+      notifications: {
+        ...current.notifications,
+        ...(settings?.notifications || {}),
+      },
+    };
     localStorage.setItem(STORAGE_KEYS.SETTINGS, JSON.stringify(merged));
+    dispatchDataSynced();
 
+    const securitySettings = dataService.getSecuritySettings();
     runCloudSync(async (client, userId) => {
       await client.from("app_settings").upsert({
         user_id: userId,
         tax_rate: Number(merged.tax_rate ?? 15),
         currency: merged.currency || "USD",
         invoice_prefix: merged.invoice_prefix || "INV-",
+        security_settings: securitySettings,
         updated_at: new Date().toISOString(),
       });
     });
   },
 
   getSecuritySettings: () => {
-    const data = localStorage.getItem(STORAGE_KEYS.SECURITY);
-    return data ? JSON.parse(data) : DEFAULT_SECURITY_SETTINGS();
+    return safeParseJSON<any>(localStorage.getItem(STORAGE_KEYS.SECURITY), DEFAULT_SECURITY_SETTINGS());
   },
 
   saveSecuritySettings: (settings: any) => {
     localStorage.setItem(STORAGE_KEYS.SECURITY, JSON.stringify(settings));
+    dispatchDataSynced();
 
+    const currentSettings = dataService.getSettings();
     runCloudSync(async (client, userId) => {
       await client.from("app_settings").upsert({
         user_id: userId,
+        tax_rate: Number(currentSettings.tax_rate ?? 15),
+        currency: currentSettings.currency || "USD",
+        invoice_prefix: currentSettings.invoice_prefix || "INV-",
         security_settings: settings,
         updated_at: new Date().toISOString(),
       });
@@ -882,8 +931,7 @@ export const dataService = {
   },
 
   getUser: () => {
-    const data = localStorage.getItem(STORAGE_KEYS.USER);
-    return data ? JSON.parse(data) : null;
+    return safeParseJSON<any>(localStorage.getItem(STORAGE_KEYS.USER), null);
   },
 
   saveUser: (user: any) => {
@@ -894,6 +942,7 @@ export const dataService = {
     const existing = dataService.getUser() || {};
     const merged = { ...existing, ...user };
     localStorage.setItem(STORAGE_KEYS.USER, JSON.stringify(merged));
+    dispatchDataSynced();
 
     runCloudSync(async (client, userId) => {
       await client.from("profiles").upsert({
@@ -910,8 +959,7 @@ export const dataService = {
   },
 
   getUsers: (): any[] => {
-    const data = localStorage.getItem("island_users");
-    return data ? JSON.parse(data) : [];
+    return safeParseJSON<any[]>(localStorage.getItem("island_users"), []);
   },
 
   saveUsers: (users: any[]): void => {
@@ -920,16 +968,19 @@ export const dataService = {
 
   getNextInvoiceNumber: (): string => {
     const invoices = dataService.getInvoices();
+    const prefix = dataService.getSettings().invoice_prefix || "INV-";
+    const escapedPrefix = prefix.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+    const regex = new RegExp(`^${escapedPrefix}(\\d+)$`, "i");
     const invNumbers = invoices
       .map((i) => {
-        const match = /^INV-(\d+)$/i.exec(i.id);
+        const match = regex.exec(i.id) || /^INV-(\d+)$/i.exec(i.id);
         return match ? parseInt(match[1], 10) : null;
       })
       .filter((n): n is number => n !== null && !Number.isNaN(n));
 
-    if (invNumbers.length === 0) return "INV-1001";
+    if (invNumbers.length === 0) return `${prefix}1001`;
     const maxNumber = Math.max(...invNumbers);
-    return `INV-${maxNumber + 1}`;
+    return `${prefix}${maxNumber + 1}`;
   },
 
   getAccounts: (): Account[] => {
@@ -938,7 +989,7 @@ export const dataService = {
       localStorage.setItem(STORAGE_KEYS.ACCOUNTS, JSON.stringify(DEFAULT_ACCOUNTS));
       return DEFAULT_ACCOUNTS;
     }
-    return JSON.parse(data);
+    return safeParseJSON<Account[]>(data, DEFAULT_ACCOUNTS);
   },
 
   saveAccount: (account: Account): void => {
@@ -980,8 +1031,7 @@ export const dataService = {
   },
 
   getJournalEntries: (): JournalEntry[] => {
-    const data = localStorage.getItem(STORAGE_KEYS.JOURNAL_ENTRIES);
-    return data ? JSON.parse(data) : [];
+    return safeParseJSON<JournalEntry[]>(localStorage.getItem(STORAGE_KEYS.JOURNAL_ENTRIES), []);
   },
 
   saveJournalEntry: (entry: JournalEntry): void => {
@@ -1151,7 +1201,7 @@ export const dataService = {
 
     const closingEntry: JournalEntry = {
       id: `CLOSE-${Date.now()}`,
-      date: new Date().toISOString().split("T")[0],
+      date: formatLocalDate(),
       description: `Closing Journal Entry - ${periodName}`,
       status: "Posted",
       lines: journalLines,
@@ -1168,7 +1218,7 @@ export const dataService = {
       localStorage.setItem(STORAGE_KEYS.NOTIFICATIONS, JSON.stringify(initial));
       return initial;
     }
-    return JSON.parse(data);
+    return safeParseJSON<AppNotification[]>(data, []);
   },
 
   saveNotification: (notification: AppNotification): void => {
@@ -1297,7 +1347,7 @@ export const dataService = {
       localStorage.setItem(STORAGE_KEYS.ECOMMERCE_SOURCES, JSON.stringify(defaults));
       return defaults;
     }
-    return JSON.parse(data);
+    return safeParseJSON<EcommerceSource[]>(data, defaults);
   },
 
   saveEcommerceSources: (sources: EcommerceSource[]): void => {
@@ -1330,8 +1380,7 @@ export const dataService = {
   },
 
   getSyncLogs: (): SyncLog[] => {
-    const data = localStorage.getItem(STORAGE_KEYS.SYNC_LOGS);
-    return data ? JSON.parse(data) : [];
+    return safeParseJSON<SyncLog[]>(localStorage.getItem(STORAGE_KEYS.SYNC_LOGS), []);
   },
 
   saveSyncLog: (log: SyncLog): SyncLog[] => {

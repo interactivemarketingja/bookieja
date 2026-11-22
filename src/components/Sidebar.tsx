@@ -1,3 +1,4 @@
+import { useState } from 'react';
 import { 
   LayoutDashboard, 
   Users,
@@ -5,7 +6,6 @@ import {
   Database, 
   Settings, 
   LogOut, 
-  ChevronRight,
   Search,
   PieChart as PieChartIcon,
   Upload,
@@ -30,6 +30,8 @@ interface SidebarProps {
 }
 
 export function Sidebar({ activePage, onPageChange, onLogout, user }: SidebarProps) {
+  const [navSearch, setNavSearch] = useState('');
+
   const navItems: { icon: any; label: string; id: PageId }[] = [
     { icon: LayoutDashboard, label: 'Dashboard', id: 'dashboard' },
     { icon: Users, label: 'Clients', id: 'clients' },
@@ -49,6 +51,10 @@ export function Sidebar({ activePage, onPageChange, onLogout, user }: SidebarPro
     { icon: Settings, label: 'Settings', id: 'settings' },
   ];
 
+  const filteredNavItems = navItems.filter((item) =>
+    item.label.toLowerCase().includes(navSearch.trim().toLowerCase())
+  );
+
   return (
     <aside className="w-64 border-r border-slate-800 bg-slate-900 flex flex-col h-full sticky top-0">
       <div className="p-6 flex items-center gap-3">
@@ -66,14 +72,16 @@ export function Sidebar({ activePage, onPageChange, onLogout, user }: SidebarPro
           <Search className="absolute left-3 top-1/2 -translate-y-1/2 text-slate-500" size={16} />
           <input 
             type="text" 
-            placeholder="Search data..." 
+            value={navSearch}
+            onChange={(e) => setNavSearch(e.target.value)}
+            placeholder="Filter menu..." 
             className="w-full pl-10 pr-4 py-2 bg-slate-800 border border-slate-700 rounded-xl text-sm text-white placeholder:text-slate-500 focus:outline-none focus:ring-2 focus:ring-brand-500/20 transition-all"
           />
         </div>
       </div>
 
       <nav className="flex-1 px-2 space-y-1 overflow-y-auto custom-scrollbar">
-        {navItems.map((item) => (
+        {filteredNavItems.length > 0 ? filteredNavItems.map((item) => (
           <button
             key={item.id}
             onClick={() => onPageChange(item.id)}
@@ -93,7 +101,9 @@ export function Sidebar({ activePage, onPageChange, onLogout, user }: SidebarPro
             {item.label}
             {activePage === item.id && <div className="ml-auto w-1.5 h-1.5 rounded-full bg-accent-500 shadow-[0_0_8px_rgba(254,209,0,0.8)]" />}
           </button>
-        ))}
+        )) : (
+          <p className="px-4 py-3 text-xs text-slate-500 font-medium">No matching pages</p>
+        )}
       </nav>
 
       <div className="p-4 border-t border-slate-800">
@@ -102,7 +112,7 @@ export function Sidebar({ activePage, onPageChange, onLogout, user }: SidebarPro
             {user?.photo ? (
               <img src={user.photo} alt="Profile" className="w-full h-full object-cover" referrerPolicy="no-referrer" />
             ) : (
-              user?.name?.substring(0, 2).toUpperCase() || 'U'
+              (user?.name || 'U').substring(0, 2).toUpperCase()
             )}
           </div>
           <div className="flex flex-col min-w-0">

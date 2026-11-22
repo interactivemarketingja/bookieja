@@ -1,14 +1,20 @@
 import { useState, useEffect } from 'react';
 import { motion } from 'motion/react';
-import { BarChart, FileText, TrendingUp, DollarSign, Download, Printer, Calendar, Clock, AlertCircle, CheckCircle2, FileSpreadsheet } from 'lucide-react';
+import { FileText, Download, Calendar, Clock, FileSpreadsheet } from 'lucide-react';
 import { dataService } from '../services/dataService';
 import { Account, Invoice, Expense, Budget } from '../types';
-import { formatCurrency, cn } from '../lib/utils';
+import { formatCurrency, cn, formatLocalDate } from '../lib/utils';
 import jsPDF from 'jspdf';
 import autoTable from 'jspdf-autotable';
 import { ReportExportModal, ReportExportFilters } from './ReportExportModal';
 
 type ReportType = 'trial-balance' | 'balance-sheet' | 'income-statement' | 'accounts-receivable' | 'accounts-payable' | 'budget-vs-actual';
+
+const getInvoiceRemaining = (inv: Invoice) => {
+  if (inv.status === 'Paid') return 0;
+  const paid = (inv.payment_history || []).reduce((sum, p) => sum + p.amount, 0);
+  return Math.max(0, inv.amount + (inv.tax_amount || 0) - paid);
+};
 
 export function ReportsPage() {
   const [activeReport, setActiveReport] = useState<ReportType>('trial-balance');
@@ -18,12 +24,19 @@ export function ReportsPage() {
   const [invoices, setInvoices] = useState<Invoice[]>([]);
   const [expenses, setExpenses] = useState<Expense[]>([]);
   const [budgets, setBudgets] = useState<Budget[]>([]);
+  const [syncTick, setSyncTick] = useState(0);
   const [dateRange, setDateRange] = useState({ 
-    start: new Date(new Date().getFullYear(), new Date().getMonth(), 1).toISOString().split('T')[0], 
-    end: new Date().toISOString().split('T')[0] 
+    start: formatLocalDate(new Date(new Date().getFullYear(), new Date().getMonth(), 1)), 
+    end: formatLocalDate() 
   });
 
-  const today = new Date().toISOString().split('T')[0];
+  const today = formatLocalDate();
+
+  useEffect(() => {
+    const onSync = () => setSyncTick(t => t + 1);
+    window.addEventListener('island-data-synced', onSync);
+    return () => window.removeEventListener('island-data-synced', onSync);
+  }, []);
 
   useEffect(() => {
     const allAccounts = dataService.getAccounts();
@@ -109,11 +122,7 @@ export function ReportsPage() {
     setExpenses(filteredExpenses);
     
     setBudgets(dataService.getBudgets());
-  }, [dateRange, statusFilter]);
-
-  const handlePrint = () => {
-    window.print();
-  };
+  }, [dateRange, statusFilter, syncTick]);
 
   const handleExportPDF = () => {
     const doc = new jsPDF();
@@ -129,14 +138,21 @@ export function ReportsPage() {
 
     if (activeReport === 'trial-balance') {
       tableHeaders = ['Code', 'Account Name', 'Debit', 'Credit'];
-      tableData = accounts.map(acc => [
-        acc.code,
-        acc.name,
-        acc.balance >= 0 ? formatCurrency(acc.balance) : '',
-        acc.balance < 0 ? formatCurrency(Math.abs(acc.balance)) : ''
-      ]);
-      const totalDebit = accounts.filter(a => a.balance >= 0).reduce((sum, a) => sum + a.balance, 0);
-      const totalCredit = accounts.filter(a => a.balance < 0).reduce((sum, a) => sum + Math.abs(a.balance), 0);
+      let totalDebit = 0;
+      let totalCredit = 0;
+      tableData = accounts.map(acc => {
+        const isDebit = acc.type === 'Asset' || acc.type === 'Expense';
+        const debit = isDebit ? Math.max(0, acc.balance) : Math.max(0, -acc.balance);
+        const credit = isDebit ? Math.max(0, -acc.balance) : Math.max(0, acc.balance);
+        totalDebit += debit;
+        totalCredit += credit;
+        return [
+          acc.code,
+          acc.name,
+          debit > 0 ? formatCurrency(debit) : '',
+          credit > 0 ? formatCurrency(credit) : ''
+        ];
+      });
       tableData.push(['', 'TOTAL', formatCurrency(totalDebit), formatCurrency(totalCredit)]);
     } else if (activeReport === 'income-statement') {
       tableHeaders = ['Category', 'Account Name', 'Amount'];
@@ -167,8 +183,8 @@ export function ReportsPage() {
       
       tableData.push(['', 'NET INCOME', formatCurrency(netIncome)]);
     } else if (activeReport === 'accounts-receivable') {
-      tableHeaders = ['Invoice ID', 'Client', 'Due Date', 'Status', 'Amount'];
-      tableData = invoices.map(i => [i.id, i.client_name, i.due_date, i.status, formatCurrency(i.amount + (i.tax_amount || 0))]);
+      tableHeaders = ['Invoice ID', 'Client', 'Due Date', 'Status', 'Amount Due'];
+      tableData = invoices.map(i => [i.id, i.client_name, i.due_date, i.status, formatCurrency(getInvoiceRemaining(i))]);
     } else if (activeReport === 'accounts-payable') {
       tableHeaders = ['Category', 'Description', 'Due Date', 'Status', 'Amount', 'Recurring'];
       tableData = expenses.map(e => [
@@ -177,7 +193,9 @@ export function ReportsPage() {
         e.due_date || '-', 
         e.status, 
         formatCurrency(e.amount),
-        e.is_recurring ? `${e.frequency} (${e.duration_months}m)` : 'No'
+        e.is_recurring
+          ? (e.end_date ? `${e.frequency || 'Monthly'} (to ${e.end_date})` : `${e.frequency || 'Monthly'} (${e.duration_months || 12}m)`)
+          : 'No'
       ]);
     } else if (activeReport === 'balance-sheet') {
       tableHeaders = ['Category', 'Account Name', 'Balance'];
@@ -208,7 +226,7 @@ export function ReportsPage() {
       headStyles: { fillColor: [15, 23, 42] },
     });
 
-    doc.save(`${activeReport}_${new Date().toISOString().split('T')[0]}.pdf`);
+    doc.save(`${activeReport}_${formatLocalDate()}.pdf`);
   };
 
   const handleExportCSV = (filters: ReportExportFilters) => {
@@ -290,12 +308,12 @@ export function ReportsPage() {
 
     if (activeReport === 'trial-balance') {
       headers = ['Code', 'Account Name', 'Debit', 'Credit'];
-      rows = exportAccounts.map(acc => [
-        acc.code,
-        acc.name,
-        acc.balance >= 0 ? acc.balance : 0,
-        acc.balance < 0 ? Math.abs(acc.balance) : 0
-      ]);
+      rows = exportAccounts.map(acc => {
+        const isDebit = acc.type === 'Asset' || acc.type === 'Expense';
+        const debit = isDebit ? Math.max(0, acc.balance) : Math.max(0, -acc.balance);
+        const credit = isDebit ? Math.max(0, -acc.balance) : Math.max(0, acc.balance);
+        return [acc.code, acc.name, debit, credit];
+      });
     } else if (activeReport === 'income-statement') {
       headers = ['Category', 'Account Name', 'Amount'];
       const revenue = exportAccounts.filter(a => a.type === 'Revenue' && a.balance !== 0);
@@ -316,11 +334,11 @@ export function ReportsPage() {
       rows.push(['SUMMARY', 'Total Operating Expenses', totalOtherExpenses]);
       rows.push(['SUMMARY', 'Net Income', totalRevenue - totalCogs - totalOtherExpenses]);
     } else if (activeReport === 'accounts-receivable') {
-      headers = ['Invoice ID', 'Client', 'Due Date', 'Status', 'Amount'];
-      rows = exportInvoices.map(i => [i.id, i.client_name, i.due_date, i.status, i.amount + (i.tax_amount || 0)]);
+      headers = ['Invoice ID', 'Client', 'Due Date', 'Status', 'Remaining Balance'];
+      rows = exportInvoices.map(i => [i.id, i.client_name, i.due_date, i.status, getInvoiceRemaining(i)]);
     } else if (activeReport === 'accounts-payable') {
       headers = ['Category', 'Description', 'Due Date', 'Status', 'Amount', 'Is Recurring', 'Frequency', 'Duration (Months)'];
-      rows = exportExpenses.map(e => [e.category, e.description, e.due_date, e.status, e.amount, e.is_recurring ? 'Yes' : 'No', e.frequency || '-', e.duration_months || '-']);
+      rows = exportExpenses.map(e => [e.category, e.description || '', e.due_date || '', e.status, e.amount, e.is_recurring ? 'Yes' : 'No', e.frequency || '-', e.duration_months || '-']);
     } else if (activeReport === 'balance-sheet') {
       headers = ['Type', 'Account Name', 'Balance'];
       exportAccounts.filter(a => ['Asset', 'Liability', 'Equity'].includes(a.type)).forEach(acc => rows.push([acc.type, acc.name, acc.balance]));
@@ -345,8 +363,11 @@ export function ReportsPage() {
     const url = URL.createObjectURL(blob);
     const link = document.createElement('a');
     link.setAttribute('href', url);
-    link.setAttribute('download', `${activeReport}_export_${new Date().toISOString().split('T')[0]}.csv`);
+    link.setAttribute('download', `${activeReport}_export_${formatLocalDate()}.csv`);
+    document.body.appendChild(link);
     link.click();
+    document.body.removeChild(link);
+    URL.revokeObjectURL(url);
   };
 
   const renderReport = () => {
@@ -427,6 +448,13 @@ export function ReportsPage() {
         </div>
 
         <div className="flex flex-wrap items-center gap-4">
+          <button 
+            onClick={() => setIsExportModalOpen(true)}
+            className="flex items-center gap-2 px-5 py-3 bg-white border border-slate-200 text-slate-700 rounded-2xl font-black uppercase tracking-widest hover:bg-slate-50 transition-all shadow-sm"
+          >
+            <FileSpreadsheet size={18} />
+            Export CSV
+          </button>
           <button 
             onClick={handleExportPDF}
             className="flex items-center gap-2 px-6 py-3 bg-brand-600 text-white rounded-2xl font-black uppercase tracking-widest hover:bg-brand-700 transition-all shadow-lg shadow-brand-500/20"
@@ -886,9 +914,10 @@ function IncomeStatement({ accounts, dateRange }: { accounts: Account[], dateRan
 }
 
 function AccountsReceivable({ invoices, today }: { invoices: Invoice[], today: string }) {
-  const totalOutstanding = invoices.reduce((acc, curr) => acc + curr.amount + (curr.tax_amount || 0), 0);
-  const overdueInvoices = invoices.filter(i => i.status === 'Overdue' || (i.status !== 'Paid' && i.due_date < today));
-  const totalOverdue = overdueInvoices.reduce((acc, curr) => acc + curr.amount + (curr.tax_amount || 0), 0);
+  const unpaidInvoices = invoices.filter(i => i.status !== 'Paid');
+  const totalOutstanding = unpaidInvoices.reduce((acc, curr) => acc + getInvoiceRemaining(curr), 0);
+  const overdueInvoices = unpaidInvoices.filter(i => i.status === 'Overdue' || i.due_date < today);
+  const totalOverdue = overdueInvoices.reduce((acc, curr) => acc + getInvoiceRemaining(curr), 0);
 
   return (
     <div className="space-y-10">
@@ -944,7 +973,7 @@ function AccountsReceivable({ invoices, today }: { invoices: Invoice[], today: s
                         </span>
                       </td>
                       <td className="px-6 py-4 text-right text-sm font-black tabular-nums">
-                        {formatCurrency(invoice.amount + (invoice.tax_amount || 0))}
+                        {formatCurrency(invoice.status === 'Paid' ? invoice.amount + (invoice.tax_amount || 0) : getInvoiceRemaining(invoice))}
                       </td>
                     </tr>
                   );

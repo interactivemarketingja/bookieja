@@ -2,9 +2,7 @@ import { useState, useEffect } from 'react';
 import { motion, AnimatePresence } from 'motion/react';
 import { 
   Receipt, 
-  Plus, 
   Search, 
-  Filter, 
   Download, 
   CheckCircle2, 
   Clock, 
@@ -15,7 +13,6 @@ import {
   Tag,
   DollarSign,
   Calendar,
-  FileText,
   Repeat,
   AlertTriangle,
   Target,
@@ -24,7 +21,7 @@ import {
   FileDown
 } from 'lucide-react';
 import { Expense, BudgetCategory, Budget } from '../types';
-import { cn, formatCurrency } from '../lib/utils';
+import { cn, formatCurrency, parseLocalDate, formatLocalDate } from '../lib/utils';
 import { dataService } from '../services/dataService';
 import { ConfirmationModal } from './ConfirmationModal';
 import { ExpenseImportModal } from './ExpenseImportModal';
@@ -76,7 +73,7 @@ export function ExpensesPage() {
     const spent = expenses
       .filter(e => {
         if (e.category !== category) return false;
-        const expDate = new Date(e.date);
+        const expDate = parseLocalDate(e.date);
         if (budget.period === 'Monthly') {
           return expDate.getMonth() === now.getMonth() && expDate.getFullYear() === now.getFullYear();
         } else if (budget.period === 'Quarterly') {
@@ -90,7 +87,7 @@ export function ExpensesPage() {
       })
       .reduce((acc, curr) => acc + curr.amount, 0);
 
-    const percentage = (spent / budget.limit_amount) * 100;
+    const percentage = budget.limit_amount > 0 ? (spent / budget.limit_amount) * 100 : 0;
     return {
       spent,
       limit: budget.limit_amount,
@@ -107,7 +104,7 @@ export function ExpensesPage() {
 
   const totalExpensesMTD = expenses
     .filter(e => {
-      const expDate = new Date(e.date);
+      const expDate = parseLocalDate(e.date);
       const now = new Date();
       return expDate.getMonth() === now.getMonth() && expDate.getFullYear() === now.getFullYear();
     })
@@ -208,14 +205,14 @@ export function ExpensesPage() {
   };
 
   const filteredExpenses = expenses.filter(expense => {
-    const matchesSearch = expense.description.toLowerCase().includes(searchQuery.toLowerCase()) ||
-                         expense.category.toLowerCase().includes(searchQuery.toLowerCase()) ||
-                         expense.id.toLowerCase().includes(searchQuery.toLowerCase());
+    const q = searchQuery.toLowerCase();
+    const matchesSearch = (expense.description || '').toLowerCase().includes(q) ||
+                         (expense.category || '').toLowerCase().includes(q) ||
+                         (expense.id || '').toLowerCase().includes(q);
     const matchesStatus = statusFilter === 'All' || expense.status === statusFilter;
     
-    const expenseDate = new Date(expense.date);
-    const matchesStartDate = !startDate || expenseDate >= new Date(startDate);
-    const matchesEndDate = !endDate || expenseDate <= new Date(endDate);
+    const matchesStartDate = !startDate || expense.date >= startDate;
+    const matchesEndDate = !endDate || expense.date <= endDate;
     
     const matchesMinAmount = !minAmount || expense.amount >= parseFloat(minAmount);
     const matchesMaxAmount = !maxAmount || expense.amount <= parseFloat(maxAmount);
@@ -231,7 +228,7 @@ export function ExpensesPage() {
       e.amount,
       e.date,
       e.due_date || '',
-      `"${e.description?.replace(/"/g, '""') || ''}"`,
+      `"${(e.description || '').replace(/"/g, '""')}"`,
       e.status,
       e.is_recurring ? 'Yes' : 'No',
       e.frequency || '-',
@@ -243,11 +240,12 @@ export function ExpensesPage() {
     const link = document.createElement('a');
     const url = URL.createObjectURL(blob);
     link.setAttribute('href', url);
-    link.setAttribute('download', `expenses_export_${new Date().toISOString().split('T')[0]}.csv`);
+    link.setAttribute('download', `expenses_export_${formatLocalDate()}.csv`);
     link.style.visibility = 'hidden';
     document.body.appendChild(link);
     link.click();
     document.body.removeChild(link);
+    URL.revokeObjectURL(url);
   };
 
   const handleDownloadPDF = (expense: Expense) => {
@@ -305,7 +303,10 @@ export function ExpensesPage() {
       doc.setFont('helvetica', 'bold');
       doc.text('Recurring:', 20, 130);
       doc.setFont('helvetica', 'normal');
-      doc.text(`${expense.frequency} for ${expense.duration_months} months`, 60, 130);
+      const recurText = expense.end_date
+        ? `${expense.frequency || 'Monthly'} until ${expense.end_date}`
+        : `${expense.frequency || 'Monthly'} for ${expense.duration_months || 12} months`;
+      doc.text(recurText, 60, 130);
     }
     
     // Footer
@@ -381,8 +382,15 @@ export function ExpensesPage() {
         </div>
         <div className="glass-panel p-6 rounded-3xl border-slate-100 shadow-sm">
           <p className="text-xs font-black text-slate-400 uppercase tracking-widest mb-2">Top Category</p>
-          <h3 className="text-3xl font-black text-jamaica-black tracking-tighter uppercase">
-            {expenses.length > 0 ? [...expenses].sort((a,b) => b.amount - a.amount)[0].category : 'N/A'}
+          <h3 className="text-3xl font-black text-jamaica-black tracking-tighter uppercase truncate">
+            {expenses.length > 0
+              ? Object.entries(
+                  expenses.reduce((acc, e) => {
+                    acc[e.category] = (acc[e.category] || 0) + e.amount;
+                    return acc;
+                  }, {} as Record<string, number>)
+                ).sort((a, b) => b[1] - a[1])[0]?.[0] || 'N/A'
+              : 'N/A'}
           </h3>
         </div>
       </div>
@@ -446,7 +454,7 @@ export function ExpensesPage() {
               )}
             </AnimatePresence>
           </div>
-          <div className="flex items-center gap-3">
+          <div className="flex flex-wrap items-center gap-3">
             <div className="flex items-center gap-2 bg-white border border-slate-200 rounded-2xl px-3 py-1.5 shadow-sm">
               <span className="text-[10px] font-black text-slate-400 uppercase tracking-widest">From</span>
               <input 
@@ -511,6 +519,13 @@ export function ExpensesPage() {
               {isSelectionMode ? "Exit Selection" : "Select Multiple"}
             </button>
             <button 
+              onClick={() => setIsImportModalOpen(true)}
+              className="flex items-center gap-2 px-4 py-3 bg-white border border-slate-200 rounded-2xl text-sm font-bold text-slate-600 hover:bg-slate-50 transition-all shadow-sm"
+            >
+              <Upload size={18} />
+              Import CSV
+            </button>
+            <button 
               onClick={handleExportCSV}
               className="flex items-center gap-2 px-4 py-3 bg-white border border-slate-200 rounded-2xl text-sm font-bold text-slate-600 hover:bg-slate-50 transition-all shadow-sm"
             >
@@ -555,13 +570,13 @@ export function ExpensesPage() {
             <tbody className="divide-y divide-slate-100">
               {isLoading ? (
                 <tr>
-                  <td colSpan={8} className="px-6 py-20 text-center">
+                  <td colSpan={isSelectionMode ? 10 : 9} className="px-6 py-20 text-center">
                     <div className="w-8 h-8 border-4 border-brand-500 border-t-transparent rounded-full animate-spin mx-auto" />
                   </td>
                 </tr>
               ) : filteredExpenses.length === 0 ? (
                 <tr>
-                  <td colSpan={8} className="px-6 py-20 text-center">
+                  <td colSpan={isSelectionMode ? 10 : 9} className="px-6 py-20 text-center">
                     <div className="flex flex-col items-center justify-center space-y-4">
                       <div className="w-16 h-16 bg-slate-50 rounded-3xl flex items-center justify-center text-slate-300">
                         <Receipt size={32} />
@@ -753,8 +768,8 @@ export function ExpenseModal({ isOpen, onClose, onSave, onRefresh, initialData, 
     id: `EXP-${Date.now()}`,
     category: '',
     amount: 0,
-    date: new Date().toISOString().split('T')[0],
-    due_date: new Date(Date.now() + 7 * 24 * 60 * 60 * 1000).toISOString().split('T')[0],
+    date: formatLocalDate(),
+    due_date: formatLocalDate(new Date(Date.now() + 7 * 24 * 60 * 60 * 1000)),
     description: '',
     status: 'Paid',
     is_recurring: false,
@@ -782,8 +797,8 @@ export function ExpenseModal({ isOpen, onClose, onSave, onRefresh, initialData, 
           id: `EXP-${Date.now()}`,
           category: categories[0]?.name || '',
           amount: 0,
-          date: new Date().toISOString().split('T')[0],
-          due_date: new Date(Date.now() + 7 * 24 * 60 * 60 * 1000).toISOString().split('T')[0],
+          date: formatLocalDate(),
+          due_date: formatLocalDate(new Date(Date.now() + 7 * 24 * 60 * 60 * 1000)),
           description: '',
           status: 'Paid',
           is_recurring: false,
@@ -806,8 +821,8 @@ export function ExpenseModal({ isOpen, onClose, onSave, onRefresh, initialData, 
     const spent = expenses
       .filter(e => {
         if (e.category !== formData.category) return false;
-        if (initialData && e.id === initialData.id) return false; // Don't count the current expense if editing
-        const expDate = new Date(e.date);
+        if (initialData && e.id === initialData.id) return false;
+        const expDate = parseLocalDate(e.date);
         if (budget.period === 'Monthly') {
           return expDate.getMonth() === now.getMonth() && expDate.getFullYear() === now.getFullYear();
         } else if (budget.period === 'Quarterly') {
@@ -822,7 +837,7 @@ export function ExpenseModal({ isOpen, onClose, onSave, onRefresh, initialData, 
       .reduce((acc, curr) => acc + curr.amount, 0);
 
     const totalSpent = spent + formData.amount;
-    const percentage = (totalSpent / budget.limit_amount) * 100;
+    const percentage = budget.limit_amount > 0 ? (totalSpent / budget.limit_amount) * 100 : 0;
     
     setBudgetUtil({
       spent: totalSpent,
@@ -895,7 +910,7 @@ export function ExpenseModal({ isOpen, onClose, onSave, onRefresh, initialData, 
               </button>
             </div>
 
-            <form onSubmit={handleSubmit} className="p-8 space-y-6">
+            <form onSubmit={handleSubmit} className="p-8 space-y-6 max-h-[75vh] overflow-y-auto">
               <div className="grid grid-cols-2 gap-6">
                 <div className="space-y-2">
                   <label className="text-xs font-black text-slate-400 uppercase tracking-widest ml-1">Expense ID</label>
@@ -1038,7 +1053,7 @@ export function ExpenseModal({ isOpen, onClose, onSave, onRefresh, initialData, 
                           </button>
                           <button
                             type="button"
-                            onClick={() => setFormData({ ...formData, end_date: new Date(Date.now() + 365 * 24 * 60 * 60 * 1000).toISOString().split('T')[0] })}
+                            onClick={() => setFormData({ ...formData, end_date: formatLocalDate(new Date(Date.now() + 365 * 24 * 60 * 60 * 1000)) })}
                             className={cn(
                               "flex-1 py-2 text-[10px] font-black uppercase tracking-widest rounded-xl transition-all",
                               formData.end_date ? "bg-brand-50 text-brand-700" : "text-slate-400 hover:bg-slate-50"
@@ -1070,19 +1085,6 @@ export function ExpenseModal({ isOpen, onClose, onSave, onRefresh, initialData, 
                             onChange={(e) => setFormData({...formData, end_date: e.target.value})}
                             className="w-full px-4 py-3 bg-white border border-slate-200 rounded-2xl text-sm font-bold focus:outline-none focus:ring-2 focus:ring-brand-500/20 transition-all"
                           />
-                        </div>
-                      )}
-
-                      {initialData?.recurring_id && (
-                        <div className="col-span-2 pt-4">
-                          <button
-                            type="button"
-                            onClick={handleDeleteSeries}
-                            className="flex items-center gap-2 text-rose-600 hover:text-rose-700 text-[10px] font-black uppercase tracking-widest transition-all"
-                          >
-                            <Trash2 size={14} />
-                            Delete Entire Recurring Series
-                          </button>
                         </div>
                       )}
                     </motion.div>
@@ -1139,99 +1141,6 @@ export function ExpenseModal({ isOpen, onClose, onSave, onRefresh, initialData, 
                   onChange={(e) => setFormData({...formData, description: e.target.value})}
                   className="w-full px-4 py-3 bg-white border border-slate-200 rounded-2xl text-sm font-bold focus:outline-none focus:ring-2 focus:ring-brand-500/20 transition-all resize-none"
                 />
-              </div>
-
-              <div className="space-y-4">
-                <div className="flex items-center justify-between px-1">
-                  <div className="flex flex-col">
-                    <label htmlFor="is_recurring" className="text-sm font-bold text-slate-700 cursor-pointer">Recurring Expense</label>
-                    <span className="text-[10px] font-medium text-slate-400">Automatically repeat this expense</span>
-                  </div>
-                  <button
-                    type="button"
-                    onClick={() => setFormData({...formData, is_recurring: !formData.is_recurring})}
-                    className={cn(
-                      "relative inline-flex h-6 w-11 items-center rounded-full transition-colors focus:outline-none focus:ring-2 focus:ring-brand-500 focus:ring-offset-2",
-                      formData.is_recurring ? "bg-brand-600" : "bg-slate-200"
-                    )}
-                  >
-                    <span
-                      className={cn(
-                        "inline-block h-4 w-4 transform rounded-full bg-white transition-transform",
-                        formData.is_recurring ? "translate-x-6" : "translate-x-1"
-                      )}
-                    />
-                  </button>
-                </div>
-
-                <AnimatePresence>
-                  {formData.is_recurring && (
-                    <motion.div 
-                      initial={{ opacity: 0, height: 0 }}
-                      animate={{ opacity: 1, height: 'auto' }}
-                      exit={{ opacity: 0, height: 0 }}
-                      className="grid grid-cols-2 gap-6 overflow-hidden"
-                    >
-                      <div className="space-y-2">
-                        <label className="text-xs font-black text-slate-400 uppercase tracking-widest ml-1">Frequency</label>
-                        <select 
-                          value={formData.frequency}
-                          onChange={(e) => setFormData({...formData, frequency: e.target.value as any})}
-                          className="w-full px-4 py-3 bg-white border border-slate-200 rounded-2xl text-sm font-bold focus:outline-none focus:ring-2 focus:ring-brand-500/20 transition-all appearance-none"
-                        >
-                          <option value="Daily">Daily</option>
-                          <option value="Weekly">Weekly</option>
-                          <option value="Monthly">Monthly</option>
-                          <option value="Yearly">Yearly</option>
-                        </select>
-                      </div>
-                      <div className="space-y-2">
-                        <div className="flex items-center justify-between ml-1">
-                          <label className="text-xs font-black text-slate-400 uppercase tracking-widest">End Condition</label>
-                          <div className="flex gap-2">
-                            <button 
-                              type="button"
-                              onClick={() => setFormData({...formData, end_date: ''})}
-                              className={cn(
-                                "text-[9px] font-black uppercase tracking-tighter px-1.5 py-0.5 rounded-md transition-all",
-                                !formData.end_date ? "bg-brand-100 text-brand-700" : "text-slate-400 hover:text-slate-600"
-                              )}
-                            >
-                              Months
-                            </button>
-                            <button 
-                              type="button"
-                              onClick={() => setFormData({...formData, duration_months: undefined, end_date: new Date(Date.now() + 365 * 24 * 60 * 60 * 1000).toISOString().split('T')[0]})}
-                              className={cn(
-                                "text-[9px] font-black uppercase tracking-tighter px-1.5 py-0.5 rounded-md transition-all",
-                                formData.end_date ? "bg-brand-100 text-brand-700" : "text-slate-400 hover:text-slate-600"
-                              )}
-                            >
-                              Date
-                            </button>
-                          </div>
-                        </div>
-                        {formData.end_date ? (
-                          <input 
-                            type="date" 
-                            value={formData.end_date}
-                            onChange={(e) => setFormData({...formData, end_date: e.target.value})}
-                            className="w-full px-4 py-3 bg-white border border-slate-200 rounded-2xl text-sm font-bold focus:outline-none focus:ring-2 focus:ring-brand-500/20 transition-all"
-                          />
-                        ) : (
-                          <input 
-                            type="number" 
-                            min="1"
-                            value={formData.duration_months || ''}
-                            onChange={(e) => setFormData({...formData, duration_months: Number(e.target.value)})}
-                            className="w-full px-4 py-3 bg-white border border-slate-200 rounded-2xl text-sm font-bold focus:outline-none focus:ring-2 focus:ring-brand-500/20 transition-all"
-                            placeholder="e.g. 12"
-                          />
-                        )}
-                      </div>
-                    </motion.div>
-                  )}
-                </AnimatePresence>
               </div>
 
               <div className="pt-4 flex flex-col gap-3">

@@ -11,8 +11,7 @@ import {
   AlertTriangle,
   CheckCircle2,
   XCircle,
-  LogOut,
-  Clock
+  LogOut
 } from 'lucide-react';
 import { motion } from 'framer-motion';
 import { dataService } from '../services/dataService';
@@ -25,9 +24,16 @@ export function SecuritySettingsPage() {
   const [passwordData, setPasswordData] = useState({ current: '', new: '', confirm: '' });
   const [message, setMessage] = useState<{ text: string, type: 'success' | 'error' } | null>(null);
 
+  const [showFullHistory, setShowFullHistory] = useState(false);
+
   useEffect(() => {
-    const data = dataService.getSecuritySettings();
-    setSettings(data);
+    const loadSettings = () => {
+      const data = dataService.getSecuritySettings();
+      setSettings(data);
+    };
+    loadSettings();
+    window.addEventListener('island-data-synced', loadSettings);
+    return () => window.removeEventListener('island-data-synced', loadSettings);
   }, []);
 
   const handleToggle2FA = () => {
@@ -48,6 +54,10 @@ export function SecuritySettingsPage() {
 
   const handlePasswordChange = async (e: React.FormEvent) => {
     e.preventDefault();
+    if (passwordData.new.length < 6) {
+      setMessage({ text: 'New password must be at least 6 characters long.', type: 'error' });
+      return;
+    }
     if (passwordData.new !== passwordData.confirm) {
       setMessage({ text: 'New passwords do not match.', type: 'error' });
       return;
@@ -80,6 +90,13 @@ export function SecuritySettingsPage() {
   };
 
   if (!settings) return null;
+
+  const loginHistory = settings.loginHistory || [];
+  const displayedHistory = showFullHistory ? loginHistory : loginHistory.slice(0, 3);
+  const securityScore =
+    50 +
+    (settings.twoFactorEnabled ? 30 : 0) +
+    (settings.loginAlerts ? 20 : 0);
 
   return (
     <div className="max-w-4xl mx-auto space-y-8 pb-20">
@@ -314,7 +331,7 @@ export function SecuritySettingsPage() {
             </div>
 
             <div className="space-y-4">
-              {settings.loginHistory.map((log: any) => (
+              {displayedHistory.map((log: any) => (
                 <div key={log.id} className="flex items-center justify-between pb-4 border-b border-slate-100 last:border-0 last:pb-0">
                   <div>
                     <div className="flex items-center gap-2">
@@ -333,22 +350,32 @@ export function SecuritySettingsPage() {
               ))}
             </div>
             
-            <button className="w-full py-2 text-[10px] font-black text-brand-600 uppercase tracking-widest hover:text-brand-700 transition-all flex items-center justify-center gap-1">
-              View Full History <ChevronRight size={12} />
-            </button>
+            {loginHistory.length > 3 && (
+              <button
+                type="button"
+                onClick={() => setShowFullHistory((prev) => !prev)}
+                className="w-full py-2 text-[10px] font-black text-brand-600 uppercase tracking-widest hover:text-brand-700 transition-all flex items-center justify-center gap-1"
+              >
+                {showFullHistory ? 'Show Recent Only' : `View Full History (${loginHistory.length})`} <ChevronRight size={12} />
+              </button>
+            )}
           </section>
 
           {/* Security Score */}
           <section className="bg-jamaica-black p-6 rounded-3xl text-white space-y-4">
             <div className="flex items-center justify-between">
               <h3 className="font-black uppercase tracking-widest text-xs">Security Score</h3>
-              <span className="text-brand-400 font-black text-xl">85%</span>
+              <span className="text-brand-400 font-black text-xl">{securityScore}%</span>
             </div>
             <div className="w-full h-2 bg-white/10 rounded-full overflow-hidden">
-              <div className="h-full bg-brand-500 rounded-full" style={{ width: '85%' }} />
+              <div className="h-full bg-brand-500 rounded-full transition-all duration-300" style={{ width: `${securityScore}%` }} />
             </div>
             <p className="text-[10px] text-slate-400 leading-relaxed">
-              Your security score is high. Enable 2FA to reach 100%.
+              {securityScore === 100
+                ? 'All recommended protections are enabled for your account.'
+                : !settings.twoFactorEnabled
+                  ? 'Enable Two-Factor Authentication to strengthen your account protection.'
+                  : 'Enable Login Notifications to reach 100%.'}
             </p>
           </section>
         </div>

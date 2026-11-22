@@ -1,15 +1,18 @@
-import { useState, useEffect } from 'react';
-import { Plus, Search, Filter, ClipboardList, Calendar, ChevronDown, ChevronUp, Download, Eye, FileText, Trash2 as TrashIcon } from 'lucide-react';
+import React, { useState, useEffect } from 'react';
+import { Plus, Search, ClipboardList, ChevronDown, ChevronUp, Download, Eye, FileText, Trash2 as TrashIcon, AlertCircle } from 'lucide-react';
 import { motion, AnimatePresence } from 'motion/react';
 import { dataService } from '../services/dataService';
 import { JournalEntry, Account, JournalLine } from '../types';
-import { formatCurrency, cn } from '../lib/utils';
+import { formatCurrency, cn, formatLocalDate } from '../lib/utils';
 import { ConfirmationModal } from './ConfirmationModal';
 
 export function LedgerPage() {
   const [entries, setEntries] = useState<JournalEntry[]>([]);
   const [accounts, setAccounts] = useState<Account[]>([]);
   const [searchTerm, setSearchTerm] = useState('');
+  const [statusFilter, setStatusFilter] = useState<'All' | 'Posted' | 'Draft'>('All');
+  const [startDate, setStartDate] = useState('');
+  const [endDate, setEndDate] = useState('');
   const [expandedEntries, setExpandedEntries] = useState<string[]>([]);
   const [isDeleteConfirmOpen, setIsDeleteConfirmOpen] = useState(false);
   const [entryToDelete, setEntryToDelete] = useState<string | null>(null);
@@ -45,10 +48,14 @@ export function LedgerPage() {
     setEntryToDelete(null);
   };
 
-  const filteredEntries = entries.filter(entry => 
-    entry.description.toLowerCase().includes(searchTerm.toLowerCase()) ||
-    entry.id.includes(searchTerm)
-  );
+  const filteredEntries = entries.filter(entry => {
+    const q = searchTerm.toLowerCase();
+    const matchesSearch = (entry.description || '').toLowerCase().includes(q) ||
+      (entry.id || '').toLowerCase().includes(q);
+    const matchesStatus = statusFilter === 'All' || entry.status === statusFilter;
+    const matchesDate = (!startDate || entry.date >= startDate) && (!endDate || entry.date <= endDate);
+    return matchesSearch && matchesStatus && matchesDate;
+  });
 
   const handleExportCSV = () => {
     if (filteredEntries.length === 0) return;
@@ -62,7 +69,7 @@ export function LedgerPage() {
         rows.push([
           index === 0 ? entry.date : '',
           index === 0 ? entry.id : '',
-          index === 0 ? `"${entry.description.replace(/"/g, '""')}"` : '',
+          index === 0 ? `"${(entry.description || '').replace(/"/g, '""')}"` : '',
           index === 0 ? entry.status : '',
           account?.code || '',
           `"${(account?.name || '').replace(/"/g, '""')}"`,
@@ -70,7 +77,6 @@ export function LedgerPage() {
           line.credit || 0
         ]);
       });
-      // Add empty row between entries for readability
       rows.push(['', '', '', '', '', '', '', '']);
     });
 
@@ -83,13 +89,16 @@ export function LedgerPage() {
     const url = URL.createObjectURL(blob);
     const link = document.createElement('a');
     link.setAttribute('href', url);
-    link.setAttribute('download', `general_ledger_export_${new Date().toISOString().split('T')[0]}.csv`);
+    link.setAttribute('download', `general_ledger_export_${formatLocalDate()}.csv`);
+    document.body.appendChild(link);
     link.click();
+    document.body.removeChild(link);
+    URL.revokeObjectURL(url);
   };
 
   return (
     <div className="space-y-6">
-      <div className="flex flex-col md:flex-row gap-4">
+      <div className="flex flex-col lg:flex-row gap-4">
         <div className="relative flex-1">
           <Search className="absolute left-4 top-1/2 -translate-y-1/2 text-slate-400" size={18} />
           <input 
@@ -100,13 +109,41 @@ export function LedgerPage() {
             className="w-full pl-12 pr-4 py-3 bg-white border border-slate-200 rounded-2xl text-sm font-bold focus:outline-none focus:ring-2 focus:ring-brand-500/20 transition-all"
           />
         </div>
-        <div className="flex gap-2">
-          <button className="flex items-center gap-2 px-4 py-3 bg-white border border-slate-200 rounded-2xl text-sm font-bold text-slate-600 hover:bg-slate-50 transition-all shadow-sm">
-            <Calendar size={18} />
-            Date Range
-          </button>
-          <button className="p-3 text-slate-400 hover:bg-slate-100 rounded-2xl transition-all border border-slate-200 bg-white">
-            <Filter size={20} />
+        <div className="flex flex-wrap items-center gap-2">
+          <div className="flex items-center gap-2 bg-white border border-slate-200 rounded-2xl px-3 py-1.5 shadow-sm">
+            <span className="text-[10px] font-black text-slate-400 uppercase tracking-widest">From</span>
+            <input 
+              type="date" 
+              value={startDate}
+              onChange={(e) => setStartDate(e.target.value)}
+              className="text-xs font-bold text-slate-600 focus:outline-none bg-transparent"
+            />
+          </div>
+          <div className="flex items-center gap-2 bg-white border border-slate-200 rounded-2xl px-3 py-1.5 shadow-sm">
+            <span className="text-[10px] font-black text-slate-400 uppercase tracking-widest">To</span>
+            <input 
+              type="date" 
+              value={endDate}
+              onChange={(e) => setEndDate(e.target.value)}
+              className="text-xs font-bold text-slate-600 focus:outline-none bg-transparent"
+            />
+          </div>
+          <select
+            value={statusFilter}
+            onChange={(e) => setStatusFilter(e.target.value as any)}
+            className="px-4 py-3 bg-white border border-slate-200 rounded-2xl text-sm font-bold text-slate-600 hover:bg-slate-50 transition-all shadow-sm focus:outline-none focus:ring-2 focus:ring-brand-500/20"
+          >
+            <option value="All">All Statuses</option>
+            <option value="Posted">Posted</option>
+            <option value="Draft">Draft</option>
+          </select>
+          <button 
+            onClick={handleExportCSV}
+            disabled={filteredEntries.length === 0}
+            className="flex items-center gap-2 px-4 py-3 bg-white border border-slate-200 rounded-2xl text-sm font-bold text-slate-600 hover:bg-slate-50 transition-all shadow-sm disabled:opacity-50"
+          >
+            <Download size={18} />
+            Export CSV
           </button>
         </div>
       </div>
@@ -367,15 +404,13 @@ export function LedgerPage() {
         }}
         onConfirm={confirmDelete}
         title="Delete Journal Entry"
-        message="Are you sure you want to delete this journal entry? This will not automatically reverse account balances if already posted."
+        message="Are you sure you want to delete this journal entry? Deleting a posted entry will automatically reverse its impact on account balances."
         confirmText="Delete"
         variant="danger"
       />
     </div>
   );
 }
-
-import React from 'react';
 
 interface JournalEntryModalProps {
   isOpen: boolean;
@@ -387,7 +422,7 @@ interface JournalEntryModalProps {
 export function JournalEntryModal({ isOpen, onClose, onSave, accounts }: JournalEntryModalProps) {
   const [formData, setFormData] = useState<JournalEntry>({
     id: `JE-${Date.now()}`,
-    date: new Date().toISOString().split('T')[0],
+    date: formatLocalDate(),
     description: '',
     status: 'Draft',
     lines: [
@@ -395,6 +430,23 @@ export function JournalEntryModal({ isOpen, onClose, onSave, accounts }: Journal
       { id: '2', account_id: '', debit: 0, credit: 0, description: '' }
     ]
   });
+  const [formError, setFormError] = useState<string | null>(null);
+
+  useEffect(() => {
+    if (isOpen) {
+      setFormError(null);
+      setFormData({
+        id: `JE-${Date.now()}`,
+        date: formatLocalDate(),
+        description: '',
+        status: 'Draft',
+        lines: [
+          { id: '1', account_id: '', debit: 0, credit: 0, description: '' },
+          { id: '2', account_id: '', debit: 0, credit: 0, description: '' }
+        ]
+      });
+    }
+  }, [isOpen]);
 
   const addLine = () => {
     setFormData({
@@ -412,6 +464,7 @@ export function JournalEntryModal({ isOpen, onClose, onSave, accounts }: Journal
   };
 
   const updateLine = (id: string, field: keyof JournalLine, value: any) => {
+    setFormError(null);
     setFormData({
       ...formData,
       lines: formData.lines.map(l => l.id === id ? { ...l, [field]: value } : l)
@@ -420,14 +473,23 @@ export function JournalEntryModal({ isOpen, onClose, onSave, accounts }: Journal
 
   const totalDebit = formData.lines.reduce((acc, curr) => acc + curr.debit, 0);
   const totalCredit = formData.lines.reduce((acc, curr) => acc + curr.credit, 0);
-  const isBalanced = totalDebit === totalCredit && totalDebit > 0;
+  const isBalanced = Math.abs(totalDebit - totalCredit) < 0.01 && totalDebit > 0;
 
   const handleSubmit = (e: React.FormEvent) => {
     e.preventDefault();
-    if (!isBalanced) {
-      alert('Journal entry must be balanced (Debits = Credits) and amount must be greater than zero.');
+    if (!formData.description.trim()) {
+      setFormError('Please provide a journal entry description.');
       return;
     }
+    if (formData.lines.some(l => !l.account_id)) {
+      setFormError('Please select an account for every journal line.');
+      return;
+    }
+    if (!isBalanced) {
+      setFormError('Journal entry must be balanced (Debits = Credits) and greater than zero.');
+      return;
+    }
+    setFormError(null);
     onSave(formData);
     onClose();
   };
@@ -457,7 +519,13 @@ export function JournalEntryModal({ isOpen, onClose, onSave, accounts }: Journal
               </button>
             </div>
 
-            <form onSubmit={handleSubmit} className="flex-1 overflow-y-auto p-8 space-y-8">
+            <form id="journal-entry-form" onSubmit={handleSubmit} className="flex-1 overflow-y-auto p-8 space-y-8">
+              {formError && (
+                <div className="p-4 bg-rose-50 border border-rose-200 text-rose-700 rounded-2xl text-xs font-bold flex items-center gap-2">
+                  <AlertCircle size={16} className="shrink-0" />
+                  <span>{formError}</span>
+                </div>
+              )}
               <div className="grid grid-cols-3 gap-6">
                 <div className="space-y-2">
                   <label className="text-xs font-black text-slate-400 uppercase tracking-widest ml-1">Date</label>
@@ -636,8 +704,8 @@ export function JournalEntryModal({ isOpen, onClose, onSave, accounts }: Journal
                 Cancel
               </button>
               <button 
-                type="button"
-                onClick={handleSubmit}
+                type="submit"
+                form="journal-entry-form"
                 disabled={!isBalanced}
                 className={cn(
                   "flex-1 px-6 py-4 rounded-2xl text-sm font-black uppercase tracking-widest transition-all shadow-lg",

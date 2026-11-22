@@ -18,7 +18,7 @@ import {
 } from 'recharts';
 import { TrendingUp, DollarSign, PieChart as PieChartIcon, Activity } from 'lucide-react';
 import { DataRecord } from '../types';
-import { formatCurrency } from '../lib/utils';
+import { formatCurrency, parseLocalDate } from '../lib/utils';
 
 interface DataVisualisationPageProps {
   transactions: DataRecord[];
@@ -29,7 +29,7 @@ const COLORS = ['#009B3A', '#FED100', '#000000', '#166534', '#d97706'];
 export function DataVisualisationPage({ transactions }: DataVisualisationPageProps) {
   // Process transactions for charts
   const monthlyData = transactions.reduce((acc: any[], curr) => {
-    const month = new Date(curr.date).toLocaleString('default', { month: 'short' });
+    const month = parseLocalDate(curr.date).toLocaleString('default', { month: 'short' });
     const existing = acc.find(d => d.name === month);
     if (existing) {
       existing.revenue += curr.revenue;

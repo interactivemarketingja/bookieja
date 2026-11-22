@@ -1,11 +1,9 @@
 import { useState, useEffect } from 'react';
-import { Plus, Search, Filter, Edit2, Trash2, BookOpen, X, AlertCircle } from 'lucide-react';
-import { motion, AnimatePresence } from 'motion/react';
+import { Search, Edit2, Trash2, BookOpen } from 'lucide-react';
 import { dataService } from '../services/dataService';
 import { Account, AccountType } from '../types';
 import { formatCurrency, cn } from '../lib/utils';
 import { ConfirmationModal } from './ConfirmationModal';
-import { AccountModal } from './AccountModal';
 
 interface AccountWithActivity extends Account {
   debits: number;
@@ -140,9 +138,6 @@ export function AccountsPage({ onEdit }: { onEdit: (account: Account) => void })
             <option value="Revenue">Revenue</option>
             <option value="Expense">Expense</option>
           </select>
-          <button className="p-3 text-slate-400 hover:bg-slate-100 rounded-2xl transition-all border border-slate-200 bg-white">
-            <Filter size={20} />
-          </button>
         </div>
       </div>
 

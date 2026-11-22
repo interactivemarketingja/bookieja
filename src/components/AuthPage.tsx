@@ -26,15 +26,17 @@ interface AuthPageProps {
   onLogin: (user: any) => void;
   initialMode?: AuthMode;
   onPasswordUpdated?: () => void;
+  onBackToHome?: () => void;
 }
 
-export function AuthPage({ onLogin, initialMode = 'login', onPasswordUpdated }: AuthPageProps) {
+export function AuthPage({ onLogin, initialMode = 'login', onPasswordUpdated, onBackToHome }: AuthPageProps) {
   const [mode, setMode] = useState<AuthMode>(initialMode);
   const [isLoading, setIsLoading] = useState(false);
   const [isResending, setIsResending] = useState(false);
   const [showPassword, setShowPassword] = useState(false);
   const [showConfirmPassword, setShowConfirmPassword] = useState(false);
   const [needsConfirmationEmail, setNeedsConfirmationEmail] = useState<string | null>(null);
+  const [networkFallbackReady, setNetworkFallbackReady] = useState(false);
   const [feedback, setFeedback] = useState<{ type: 'error' | 'success'; message: string } | null>(null);
   const [formData, setFormData] = useState({
     email: '',
@@ -51,6 +53,7 @@ export function AuthPage({ onLogin, initialMode = 'login', onPasswordUpdated }: 
   const switchMode = (nextMode: AuthMode) => {
     setFeedback(null);
     setNeedsConfirmationEmail(null);
+    setNetworkFallbackReady(false);
     setShowPassword(false);
     setShowConfirmPassword(false);
     setFormData((prev) => ({ ...prev, password: '', confirmPassword: '' }));
@@ -86,11 +89,103 @@ export function AuthPage({ onLogin, initialMode = 'login', onPasswordUpdated }: 
     }
   };
 
+  const runLocalAuthFallback = async () => {
+    const email = formData.email.trim();
+    if (!email) {
+      setFeedback({ type: 'error', message: 'Please enter your email address first.' });
+      return;
+    }
+
+    setIsLoading(true);
+    setFeedback(null);
+    setNetworkFallbackReady(false);
+
+    try {
+      await new Promise((resolve) => setTimeout(resolve, 250));
+      const users = dataService.getUsers();
+
+      if (mode === 'reset') {
+        setFeedback({
+          type: 'success',
+          message: 'Local mode active: you can sign in directly or create a new local workspace account.',
+        });
+        return;
+      }
+
+      if (mode === 'signup') {
+        if (!formData.name.trim()) {
+          throw new Error('Please enter your full name.');
+        }
+        if (formData.password.length < 6) {
+          throw new Error('Password must be at least 6 characters long.');
+        }
+        if (formData.password !== formData.confirmPassword) {
+          throw new Error('Passwords do not match.');
+        }
+
+        const existingIndex = users.findIndex((u: any) => u.email.toLowerCase() === email.toLowerCase());
+        const localUser = {
+          id: existingIndex >= 0 ? users[existingIndex].id : Math.random().toString(36).slice(2, 11),
+          name: formData.name.trim(),
+          company: formData.company.trim() || 'Island Bookkeeping',
+          role: 'Business Owner',
+          email,
+          password: formData.password,
+          authMode: 'local',
+        };
+
+        if (existingIndex >= 0) {
+          users[existingIndex] = localUser;
+        } else {
+          users.push(localUser);
+        }
+        dataService.saveUsers(users);
+        dataService.saveUser(localUser);
+        onLogin(localUser);
+        return;
+      }
+
+      // Local login: match existing user or provision a local session for testing if none exists
+      let user = users.find(
+        (u: any) => u.email.toLowerCase() === email.toLowerCase() && u.password === formData.password
+      );
+
+      if (!user) {
+        const emailConflict = users.some((u: any) => u.email.toLowerCase() === email.toLowerCase());
+        if (emailConflict) {
+          throw new Error('Invalid email or password for this local account.');
+        }
+        user = {
+          id: Math.random().toString(36).slice(2, 11),
+          name: email.split('@')[0].replace(/[._-]+/g, ' ').replace(/\b\w/g, (c) => c.toUpperCase()),
+          company: 'Island Bookkeeping',
+          role: 'Business Owner',
+          email,
+          password: formData.password,
+          authMode: 'local',
+        };
+        users.push(user);
+        dataService.saveUsers(users);
+      }
+
+      dataService.saveUser(user);
+      onLogin(user);
+    } catch (err: any) {
+      setFeedback({
+        type: 'error',
+        message: err?.message || 'Unable to sign in locally.',
+      });
+    } finally {
+      setIsLoading(false);
+    }
+  };
+
   const handleSubmit = async (e: React.FormEvent) => {
     e.preventDefault();
     setIsLoading(true);
     setFeedback(null);
     setNeedsConfirmationEmail(null);
+    setNetworkFallbackReady(false);
 
     const email = formData.email.trim();
 
@@ -252,10 +347,32 @@ export function AuthPage({ onLogin, initialMode = 'login', onPasswordUpdated }: 
         onLogin(user);
       }
     } catch (error: any) {
-      setFeedback({
-        type: 'error',
-        message: error?.message || 'Authentication failed. Please try again.',
-      });
+      const rawMessage = String(error?.message || '');
+      const isFetchFailure =
+        error?.name === 'AuthRetryableFetchError' ||
+        /failed to fetch|networkerror|load failed|err_name_not_resolved/i.test(rawMessage);
+      const isInvalidApiKey = /invalid api key/i.test(rawMessage);
+
+      if (isFetchFailure) {
+        setNetworkFallbackReady(true);
+        setFeedback({
+          type: 'error',
+          message:
+            'Could not reach the Supabase authentication server. Please verify that your Supabase project is active and VITE_SUPABASE_URL in .env is correct, or continue in Local Workspace Mode below.',
+        });
+      } else if (isInvalidApiKey) {
+        setNetworkFallbackReady(true);
+        setFeedback({
+          type: 'error',
+          message:
+            'The Supabase API key in .env does not match this project URL (vttbgudpbjvvsswuoetx). Please provide the matching Publishable or Anon key from your Supabase project API settings, or continue in Local Workspace Mode below.',
+        });
+      } else {
+        setFeedback({
+          type: 'error',
+          message: rawMessage || 'Authentication failed. Please try again.',
+        });
+      }
     } finally {
       setIsLoading(false);
     }
@@ -298,10 +415,10 @@ export function AuthPage({ onLogin, initialMode = 'login', onPasswordUpdated }: 
   };
 
   return (
-    <div className="min-h-screen flex bg-slate-50">
+    <div className="min-h-screen flex bg-slate-100">
       {/* Left Side: Branding & Features (Desktop Only) */}
-      <div className="hidden lg:flex lg:w-1/2 bg-jamaica-black relative overflow-hidden p-16 flex-col justify-between">
-        <div className="absolute top-0 right-0 w-full h-full opacity-20 pointer-events-none">
+      <div className="hidden lg:flex lg:w-[46%] bg-black relative overflow-hidden p-14 flex-col justify-between">
+        <div className="absolute top-0 right-0 w-full h-full opacity-25 pointer-events-none">
           <div className="absolute top-[-10%] right-[-10%] w-[60%] h-[60%] rounded-full bg-brand-500 blur-[120px]" />
           <div className="absolute bottom-[-10%] left-[-10%] w-[50%] h-[50%] rounded-full bg-accent-500 blur-[100px]" />
         </div>
@@ -320,31 +437,31 @@ export function AuthPage({ onLogin, initialMode = 'login', onPasswordUpdated }: 
           <motion.div
             initial={{ opacity: 0, y: 20 }}
             animate={{ opacity: 1, y: 0 }}
-            transition={{ delay: 0.2 }}
+            transition={{ delay: 0.15 }}
             className="max-w-md"
           >
-            <h1 className="text-6xl font-black text-white leading-[0.9] mb-8 tracking-tighter">
-              FINANCIAL <span className="text-brand-500 italic">CLARITY</span> FOR THE <span className="text-accent-500">ISLANDS.</span>
+            <h1 className="text-5xl xl:text-6xl font-black text-white leading-[0.95] mb-6 tracking-tighter">
+              FINANCIAL <span className="text-brand-400 italic">CLARITY</span> FOR THE <span className="text-accent-500">ISLANDS.</span>
             </h1>
-            <p className="text-slate-400 text-lg mb-12 font-medium">
-              Join the Caribbean's fastest growing remote enterprises making smarter financial decisions with Island Bookkeeping.
+            <p className="text-white/90 text-base xl:text-lg mb-10 font-medium leading-relaxed">
+              Double-entry ledgers, G.C.T. invoicing, and audit-ready financial statements built for Caribbean and remote enterprises.
             </p>
 
-            <div className="space-y-6">
+            <div className="space-y-4">
               {features.map((f, i) => (
                 <motion.div
                   key={f.title}
-                  initial={{ opacity: 0, x: -20 }}
+                  initial={{ opacity: 0, x: -16 }}
                   animate={{ opacity: 1, x: 0 }}
-                  transition={{ delay: 0.4 + i * 0.1 }}
-                  className="flex gap-5 items-center p-4 rounded-2xl bg-white/5 border border-white/10 backdrop-blur-sm"
+                  transition={{ delay: 0.25 + i * 0.08 }}
+                  className="flex gap-4 items-center p-4 rounded-2xl bg-white/10 border border-white/15 backdrop-blur-sm"
                 >
-                  <div className="w-12 h-12 rounded-xl bg-brand-500 flex items-center justify-center text-white shrink-0 shadow-lg shadow-brand-500/20">
-                    <f.icon size={24} />
+                  <div className="w-11 h-11 rounded-xl bg-brand-500 flex items-center justify-center text-white shrink-0 shadow-lg shadow-brand-500/25">
+                    <f.icon size={22} />
                   </div>
                   <div>
-                    <h3 className="text-white font-bold">{f.title}</h3>
-                    <p className="text-slate-400 text-xs">{f.desc}</p>
+                    <h3 className="text-white font-bold text-sm">{f.title}</h3>
+                    <p className="text-white/85 text-xs mt-0.5">{f.desc}</p>
                   </div>
                 </motion.div>
               ))}
@@ -352,44 +469,57 @@ export function AuthPage({ onLogin, initialMode = 'login', onPasswordUpdated }: 
           </motion.div>
         </div>
 
-        <div className="relative z-10 flex items-center gap-6 text-slate-500 text-xs font-bold uppercase tracking-widest">
+        <div className="relative z-10 flex items-center gap-6 text-white/80 text-xs font-bold uppercase tracking-widest">
           <span>© 2026 Island Bookkeeping Inc.</span>
           <a href="#" className="hover:text-accent-500 transition-colors">Privacy</a>
           <a href="#" className="hover:text-accent-500 transition-colors">Terms</a>
         </div>
       </div>
 
-      {/* Right Side: Auth Form */}
-      <div className="w-full lg:w-1/2 flex items-center justify-center p-6 sm:p-10">
+      {/* Right Side: High-Contrast Framed Auth Form */}
+      <div className="w-full lg:w-[54%] flex flex-col items-center justify-center p-5 sm:p-10 relative">
+        {onBackToHome && mode !== 'update-password' && (
+          <div className="w-full max-w-lg mb-4 flex justify-start">
+            <button
+              type="button"
+              onClick={onBackToHome}
+              className="inline-flex items-center gap-2 px-3.5 py-2 bg-white border border-slate-300 rounded-xl text-xs font-bold text-black hover:bg-black hover:text-white transition-colors shadow-sm cursor-pointer"
+            >
+              <ArrowLeft size={15} />
+              Back to overview
+            </button>
+          </div>
+        )}
+
         <motion.div
-          initial={{ opacity: 0, scale: 0.97 }}
+          initial={{ opacity: 0, scale: 0.98 }}
           animate={{ opacity: 1, scale: 1 }}
-          className="w-full max-w-md"
+          className="w-full max-w-lg bg-white border-2 border-slate-300 rounded-3xl p-7 sm:p-10 shadow-2xl shadow-slate-900/10"
         >
-          <div className="text-center mb-8">
-            <div className="lg:hidden flex justify-center mb-6">
-              <div className="w-14 h-14 jamaica-gradient rounded-2xl flex items-center justify-center text-white font-black text-3xl shadow-xl shadow-brand-500/20">
+          <div className="text-center mb-7">
+            <div className="lg:hidden flex justify-center mb-5">
+              <div className="w-12 h-12 jamaica-gradient rounded-2xl flex items-center justify-center text-white font-black text-2xl shadow-lg shadow-brand-500/20">
                 I
               </div>
             </div>
-            <h2 className="text-4xl font-black text-jamaica-black mb-2 tracking-tighter">
+            <h2 className="text-3xl sm:text-4xl font-black text-black mb-2 tracking-tight">
               {getHeading()}
             </h2>
-            <p className="text-slate-500 font-medium text-sm">
+            <p className="text-black/80 font-medium text-sm">
               {getSubheading()}
             </p>
           </div>
 
           {(mode === 'login' || mode === 'signup') && (
-            <div className="grid grid-cols-2 p-1.5 bg-slate-200/70 rounded-2xl mb-6">
+            <div className="grid grid-cols-2 p-1.5 bg-black rounded-2xl mb-6">
               <button
                 type="button"
                 onClick={() => switchMode('login')}
                 className={cn(
-                  'py-2.5 rounded-xl text-xs font-black uppercase tracking-widest transition-all',
+                  'py-3 rounded-xl text-xs font-black uppercase tracking-widest transition-all cursor-pointer',
                   mode === 'login'
-                    ? 'bg-white text-jamaica-black shadow-sm'
-                    : 'text-slate-500 hover:text-slate-700'
+                    ? 'bg-brand-500 text-white shadow-md'
+                    : 'text-white/85 hover:text-white'
                 )}
               >
                 Sign In
@@ -398,10 +528,10 @@ export function AuthPage({ onLogin, initialMode = 'login', onPasswordUpdated }: 
                 type="button"
                 onClick={() => switchMode('signup')}
                 className={cn(
-                  'py-2.5 rounded-xl text-xs font-black uppercase tracking-widest transition-all',
+                  'py-3 rounded-xl text-xs font-black uppercase tracking-widest transition-all cursor-pointer',
                   mode === 'signup'
-                    ? 'bg-white text-jamaica-black shadow-sm'
-                    : 'text-slate-500 hover:text-slate-700'
+                    ? 'bg-brand-500 text-white shadow-md'
+                    : 'text-white/85 hover:text-white'
                 )}
               >
                 Create Account
@@ -416,10 +546,10 @@ export function AuthPage({ onLogin, initialMode = 'login', onPasswordUpdated }: 
                 animate={{ opacity: 1, y: 0 }}
                 exit={{ opacity: 0, y: -8 }}
                 className={cn(
-                  'mb-6 p-4 rounded-2xl text-sm font-medium border space-y-3',
+                  'mb-6 p-4 rounded-2xl text-sm font-semibold border-2 space-y-3',
                   feedback.type === 'error'
-                    ? 'bg-rose-50 border-rose-200 text-rose-700'
-                    : 'bg-emerald-50 border-emerald-200 text-emerald-700'
+                    ? 'bg-rose-50 border-rose-300 text-rose-800'
+                    : 'bg-emerald-50 border-emerald-300 text-emerald-800'
                 )}
               >
                 <div className="flex items-start gap-3">
@@ -435,10 +565,21 @@ export function AuthPage({ onLogin, initialMode = 'login', onPasswordUpdated }: 
                     type="button"
                     disabled={isResending}
                     onClick={() => handleResendConfirmation(needsConfirmationEmail)}
-                    className="inline-flex items-center gap-2 px-3 py-1.5 bg-white border border-rose-200 rounded-xl text-xs font-bold text-rose-700 hover:bg-rose-100/50 transition-all disabled:opacity-50"
+                    className="inline-flex items-center gap-2 px-3 py-1.5 bg-white border border-rose-300 rounded-xl text-xs font-bold text-rose-800 hover:bg-rose-100/60 transition-all disabled:opacity-50 cursor-pointer"
                   >
                     <RefreshCw size={14} className={isResending ? 'animate-spin' : ''} />
                     {isResending ? 'Resending...' : 'Resend confirmation email'}
+                  </button>
+                )}
+                {networkFallbackReady && (
+                  <button
+                    type="button"
+                    disabled={isLoading}
+                    onClick={runLocalAuthFallback}
+                    className="inline-flex items-center gap-2 px-4 py-2 bg-black text-white rounded-xl text-xs font-bold hover:bg-brand-600 transition-all disabled:opacity-50 cursor-pointer"
+                  >
+                    Continue in Local Workspace Mode
+                    <ArrowRight size={14} />
                   </button>
                 )}
               </motion.div>
@@ -446,12 +587,12 @@ export function AuthPage({ onLogin, initialMode = 'login', onPasswordUpdated }: 
           </AnimatePresence>
 
           {mode === 'verify-email' ? (
-            <div className="bg-white border border-slate-200 rounded-3xl p-8 text-center space-y-6 shadow-sm">
-              <div className="w-16 h-16 mx-auto bg-brand-50 text-brand-600 rounded-2xl flex items-center justify-center">
+            <div className="bg-slate-50 border-2 border-slate-200 rounded-2xl p-6 text-center space-y-6">
+              <div className="w-16 h-16 mx-auto bg-brand-100 text-brand-700 rounded-2xl flex items-center justify-center">
                 <Mail size={32} />
               </div>
               <div className="space-y-2">
-                <p className="text-sm text-slate-600 leading-relaxed">
+                <p className="text-sm font-medium text-black leading-relaxed">
                   Click the confirmation link in your email to activate your account, then return here to sign in.
                 </p>
               </div>
@@ -460,7 +601,7 @@ export function AuthPage({ onLogin, initialMode = 'login', onPasswordUpdated }: 
                   type="button"
                   disabled={isResending}
                   onClick={() => handleResendConfirmation()}
-                  className="w-full flex items-center justify-center gap-2 py-3.5 bg-slate-100 text-slate-700 rounded-2xl text-xs font-black uppercase tracking-widest hover:bg-slate-200 transition-all disabled:opacity-50"
+                  className="w-full flex items-center justify-center gap-2 py-3.5 bg-white border-2 border-slate-300 text-black rounded-xl text-xs font-black uppercase tracking-widest hover:bg-slate-100 transition-all disabled:opacity-50 cursor-pointer"
                 >
                   <RefreshCw size={15} className={isResending ? 'animate-spin' : ''} />
                   {isResending ? 'Sending...' : 'Resend Confirmation Email'}
@@ -468,7 +609,7 @@ export function AuthPage({ onLogin, initialMode = 'login', onPasswordUpdated }: 
                 <button
                   type="button"
                   onClick={() => switchMode('login')}
-                  className="w-full flex items-center justify-center gap-2 py-3.5 bg-brand-600 text-white rounded-2xl text-xs font-black uppercase tracking-widest hover:bg-brand-700 transition-all shadow-lg shadow-brand-500/20"
+                  className="w-full flex items-center justify-center gap-2 py-3.5 bg-brand-500 text-white rounded-xl text-xs font-black uppercase tracking-widest hover:bg-brand-600 transition-all shadow-lg shadow-brand-500/20 cursor-pointer"
                 >
                   <ArrowLeft size={15} />
                   Back to Sign In
@@ -486,36 +627,42 @@ export function AuthPage({ onLogin, initialMode = 'login', onPasswordUpdated }: 
                     className="space-y-4 overflow-hidden"
                   >
                     <div className="space-y-1.5">
-                      <label className="text-xs font-black text-slate-400 uppercase tracking-widest ml-1">
+                      <label className="block text-xs font-bold text-black uppercase tracking-wider ml-0.5">
                         Full Name
                       </label>
-                      <div className="relative">
-                        <User className="absolute left-4 top-1/2 -translate-y-1/2 text-slate-400" size={18} />
+                      <div className="relative group">
+                        <User
+                          className="absolute left-3.5 top-1/2 -translate-y-1/2 text-slate-700 group-focus-within:text-brand-600 transition-colors"
+                          size={18}
+                        />
                         <input
                           type="text"
                           required
                           autoComplete="name"
-                          placeholder="John Doe"
+                          placeholder="Kareem Campbell"
                           value={formData.name}
                           onChange={(e) => setFormData({ ...formData, name: e.target.value })}
-                          className="w-full pl-12 pr-4 py-3 bg-white border border-slate-200 rounded-2xl text-sm font-medium focus:outline-none focus:ring-2 focus:ring-brand-500/20 transition-all"
+                          className="w-full pl-11 pr-4 py-3 bg-slate-50 focus:bg-white border-2 border-slate-300 focus:border-brand-600 rounded-xl text-sm font-semibold text-black placeholder:text-slate-500 focus:outline-none focus:ring-4 focus:ring-brand-500/15 transition-all"
                         />
                       </div>
                     </div>
 
                     <div className="space-y-1.5">
-                      <label className="text-xs font-black text-slate-400 uppercase tracking-widest ml-1">
-                        Company Name <span className="text-slate-300 font-semibold">(Optional)</span>
+                      <label className="block text-xs font-bold text-black uppercase tracking-wider ml-0.5">
+                        Company Name <span className="text-slate-700 font-semibold normal-case">(Optional)</span>
                       </label>
-                      <div className="relative">
-                        <Building2 className="absolute left-4 top-1/2 -translate-y-1/2 text-slate-400" size={18} />
+                      <div className="relative group">
+                        <Building2
+                          className="absolute left-3.5 top-1/2 -translate-y-1/2 text-slate-700 group-focus-within:text-brand-600 transition-colors"
+                          size={18}
+                        />
                         <input
                           type="text"
                           autoComplete="organization"
-                          placeholder="Island Tech Solutions"
+                          placeholder="Blue Mountain Logistics Ltd."
                           value={formData.company}
                           onChange={(e) => setFormData({ ...formData, company: e.target.value })}
-                          className="w-full pl-12 pr-4 py-3 bg-white border border-slate-200 rounded-2xl text-sm font-medium focus:outline-none focus:ring-2 focus:ring-brand-500/20 transition-all"
+                          className="w-full pl-11 pr-4 py-3 bg-slate-50 focus:bg-white border-2 border-slate-300 focus:border-brand-600 rounded-xl text-sm font-semibold text-black placeholder:text-slate-500 focus:outline-none focus:ring-4 focus:ring-brand-500/15 transition-all"
                         />
                       </div>
                     </div>
@@ -525,11 +672,14 @@ export function AuthPage({ onLogin, initialMode = 'login', onPasswordUpdated }: 
 
               {mode !== 'update-password' && (
                 <div className="space-y-1.5">
-                  <label className="text-xs font-black text-slate-400 uppercase tracking-widest ml-1">
+                  <label className="block text-xs font-bold text-black uppercase tracking-wider ml-0.5">
                     Email Address
                   </label>
-                  <div className="relative">
-                    <Mail className="absolute left-4 top-1/2 -translate-y-1/2 text-slate-400" size={18} />
+                  <div className="relative group">
+                    <Mail
+                      className="absolute left-3.5 top-1/2 -translate-y-1/2 text-slate-700 group-focus-within:text-brand-600 transition-colors"
+                      size={18}
+                    />
                     <input
                       type="email"
                       required
@@ -537,7 +687,7 @@ export function AuthPage({ onLogin, initialMode = 'login', onPasswordUpdated }: 
                       placeholder="name@company.com"
                       value={formData.email}
                       onChange={(e) => setFormData({ ...formData, email: e.target.value })}
-                      className="w-full pl-12 pr-4 py-3 bg-white border border-slate-200 rounded-2xl text-sm font-medium focus:outline-none focus:ring-2 focus:ring-brand-500/20 transition-all"
+                      className="w-full pl-11 pr-4 py-3 bg-slate-50 focus:bg-white border-2 border-slate-300 focus:border-brand-600 rounded-xl text-sm font-semibold text-black placeholder:text-slate-500 focus:outline-none focus:ring-4 focus:ring-brand-500/15 transition-all"
                     />
                   </div>
                 </div>
@@ -546,68 +696,74 @@ export function AuthPage({ onLogin, initialMode = 'login', onPasswordUpdated }: 
               {mode !== 'reset' && (
                 <div className="space-y-1.5">
                   <div className="flex justify-between items-center">
-                    <label className="text-xs font-black text-slate-400 uppercase tracking-widest ml-1">
+                    <label className="block text-xs font-bold text-black uppercase tracking-wider ml-0.5">
                       {mode === 'update-password' ? 'New Password' : 'Password'}
                     </label>
                     {mode === 'login' && (
                       <button
                         type="button"
                         onClick={() => switchMode('reset')}
-                        className="text-[10px] font-black text-brand-600 hover:text-brand-700 uppercase tracking-wider"
+                        className="text-xs font-bold text-brand-700 hover:text-brand-800 hover:underline cursor-pointer"
                       >
-                        Forgot?
+                        Forgot password?
                       </button>
                     )}
                   </div>
-                  <div className="relative">
-                    <Lock className="absolute left-4 top-1/2 -translate-y-1/2 text-slate-400" size={18} />
+                  <div className="relative group">
+                    <Lock
+                      className="absolute left-3.5 top-1/2 -translate-y-1/2 text-slate-700 group-focus-within:text-brand-600 transition-colors"
+                      size={18}
+                    />
                     <input
                       type={showPassword ? 'text' : 'password'}
                       required
                       minLength={6}
                       autoComplete={mode === 'login' ? 'current-password' : 'new-password'}
-                      placeholder="••••••••"
+                      placeholder="Enter your password"
                       value={formData.password}
                       onChange={(e) => setFormData({ ...formData, password: e.target.value })}
-                      className="w-full pl-12 pr-12 py-3 bg-white border border-slate-200 rounded-2xl text-sm font-medium focus:outline-none focus:ring-2 focus:ring-brand-500/20 transition-all"
+                      className="w-full pl-11 pr-12 py-3 bg-slate-50 focus:bg-white border-2 border-slate-300 focus:border-brand-600 rounded-xl text-sm font-semibold text-black placeholder:text-slate-500 focus:outline-none focus:ring-4 focus:ring-brand-500/15 transition-all"
                     />
                     <button
                       type="button"
                       onClick={() => setShowPassword(!showPassword)}
                       aria-label={showPassword ? 'Hide password' : 'Show password'}
-                      className="absolute right-4 top-1/2 -translate-y-1/2 text-slate-400 hover:text-slate-600 transition-colors"
+                      className="absolute right-3.5 top-1/2 -translate-y-1/2 text-slate-700 hover:text-black transition-colors cursor-pointer"
                     >
                       {showPassword ? <EyeOff size={18} /> : <Eye size={18} />}
                     </button>
                   </div>
                   {(mode === 'signup' || mode === 'update-password') && (
-                    <p className="text-[11px] text-slate-400 ml-1">Must be at least 6 characters</p>
+                    <p className="text-xs font-medium text-slate-700 ml-0.5">Must be at least 6 characters</p>
                   )}
                 </div>
               )}
 
               {(mode === 'signup' || mode === 'update-password') && (
                 <div className="space-y-1.5">
-                  <label className="text-xs font-black text-slate-400 uppercase tracking-widest ml-1">
+                  <label className="block text-xs font-bold text-black uppercase tracking-wider ml-0.5">
                     Confirm Password
                   </label>
-                  <div className="relative">
-                    <Lock className="absolute left-4 top-1/2 -translate-y-1/2 text-slate-400" size={18} />
+                  <div className="relative group">
+                    <Lock
+                      className="absolute left-3.5 top-1/2 -translate-y-1/2 text-slate-700 group-focus-within:text-brand-600 transition-colors"
+                      size={18}
+                    />
                     <input
                       type={showConfirmPassword ? 'text' : 'password'}
                       required
                       minLength={6}
                       autoComplete="new-password"
-                      placeholder="••••••••"
+                      placeholder="Re-enter your password"
                       value={formData.confirmPassword}
                       onChange={(e) => setFormData({ ...formData, confirmPassword: e.target.value })}
-                      className="w-full pl-12 pr-12 py-3 bg-white border border-slate-200 rounded-2xl text-sm font-medium focus:outline-none focus:ring-2 focus:ring-brand-500/20 transition-all"
+                      className="w-full pl-11 pr-12 py-3 bg-slate-50 focus:bg-white border-2 border-slate-300 focus:border-brand-600 rounded-xl text-sm font-semibold text-black placeholder:text-slate-500 focus:outline-none focus:ring-4 focus:ring-brand-500/15 transition-all"
                     />
                     <button
                       type="button"
                       onClick={() => setShowConfirmPassword(!showConfirmPassword)}
                       aria-label={showConfirmPassword ? 'Hide confirm password' : 'Show confirm password'}
-                      className="absolute right-4 top-1/2 -translate-y-1/2 text-slate-400 hover:text-slate-600 transition-colors"
+                      className="absolute right-3.5 top-1/2 -translate-y-1/2 text-slate-700 hover:text-black transition-colors cursor-pointer"
                     >
                       {showConfirmPassword ? <EyeOff size={18} /> : <Eye size={18} />}
                     </button>
@@ -618,16 +774,16 @@ export function AuthPage({ onLogin, initialMode = 'login', onPasswordUpdated }: 
               <button
                 type="submit"
                 disabled={isLoading}
-                className="w-full flex items-center justify-center gap-2 py-4 mt-2 bg-brand-600 text-white rounded-2xl font-black uppercase tracking-widest hover:bg-brand-700 transition-all shadow-xl shadow-brand-500/20 disabled:opacity-50"
+                className="w-full flex items-center justify-center gap-2 py-4 mt-3 bg-brand-500 hover:bg-brand-600 text-white rounded-xl text-sm font-black uppercase tracking-wider transition-all shadow-lg shadow-brand-500/25 disabled:opacity-50 cursor-pointer"
               >
                 {isLoading ? (
                   <div className="w-5 h-5 border-2 border-white/30 border-t-white rounded-full animate-spin" />
                 ) : (
                   <>
                     {mode === 'login'
-                      ? 'Sign In'
+                      ? 'Sign In to Workspace'
                       : mode === 'signup'
-                        ? 'Create Account'
+                        ? 'Create Free Account'
                         : mode === 'update-password'
                           ? 'Update Password'
                           : 'Send Reset Link'}
@@ -639,7 +795,7 @@ export function AuthPage({ onLogin, initialMode = 'login', onPasswordUpdated }: 
           )}
 
           {mode !== 'verify-email' && mode !== 'update-password' && (
-            <p className="text-center mt-8 text-sm text-slate-500">
+            <p className="text-center mt-6 pt-5 border-t border-slate-200 text-sm font-medium text-black">
               {mode === 'login'
                 ? "Don't have an account?"
                 : mode === 'signup'
@@ -648,9 +804,9 @@ export function AuthPage({ onLogin, initialMode = 'login', onPasswordUpdated }: 
               <button
                 type="button"
                 onClick={() => switchMode(mode === 'login' ? 'signup' : 'login')}
-                className="font-bold text-brand-600 hover:text-brand-700 transition-colors"
+                className="font-bold text-brand-700 hover:text-brand-800 hover:underline transition-colors cursor-pointer"
               >
-                {mode === 'login' ? 'Sign up now' : 'Sign in'}
+                {mode === 'login' ? 'Create one now' : 'Sign in'}
               </button>
             </p>
           )}

@@ -14,8 +14,8 @@ import {
   AreaChart,
   Area
 } from 'recharts';
-import { formatCurrency } from '../lib/utils';
-import { TrendingUp, Info } from 'lucide-react';
+import { formatCurrency, parseLocalDate } from '../lib/utils';
+import { Info } from 'lucide-react';
 import { DataRecord } from '../types';
 
 interface AnalyticsPageProps {
@@ -63,7 +63,7 @@ const PieTooltip = ({ active, payload }: any) => {
 export function AnalyticsPage({ transactions }: AnalyticsPageProps) {
   // Process transactions for charts
   const monthlyData = transactions.reduce((acc: any[], curr) => {
-    const month = new Date(curr.date).toLocaleString('default', { month: 'short' });
+    const month = parseLocalDate(curr.date).toLocaleString('default', { month: 'short' });
     const existing = acc.find(d => d.name === month);
     if (existing) {
       existing.revenue += curr.revenue;

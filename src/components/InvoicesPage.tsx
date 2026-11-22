@@ -6,7 +6,6 @@ import {
   Search, 
   Filter, 
   Download, 
-  MoreVertical, 
   CheckCircle2, 
   Clock, 
   AlertCircle,
@@ -26,7 +25,7 @@ import {
 import { jsPDF } from 'jspdf';
 import autoTable from 'jspdf-autotable';
 import { Invoice } from '../types';
-import { cn, formatCurrency } from '../lib/utils';
+import { cn, formatCurrency, formatLocalDate } from '../lib/utils';
 import { dataService } from '../services/dataService';
 import { ConfirmationModal } from './ConfirmationModal';
 
@@ -48,7 +47,7 @@ export function InvoicesPage() {
   const [isDeleteConfirmOpen, setIsDeleteConfirmOpen] = useState(false);
   const [isBulkDeleteConfirmOpen, setIsBulkDeleteConfirmOpen] = useState(false);
   const [invoiceToDelete, setInvoiceToDelete] = useState<string | null>(null);
-  const today = new Date().toISOString().split('T')[0];
+  const today = formatLocalDate();
 
   const fetchData = () => {
     try {
@@ -159,13 +158,22 @@ export function InvoicesPage() {
       doc.text(invoice.client_name, 14, 62);
       
       // Line Items Table
-      const tableData = (invoice.line_items || []).map(item => [
-        item.description,
-        item.quantity.toString(),
-        formatCurrency(item.rate),
-        formatCurrency(item.tax_amount || 0),
-        formatCurrency(item.amount)
-      ]);
+      const items = invoice.line_items || [];
+      const tableData = items.length > 0
+        ? items.map(item => [
+            item.description,
+            item.quantity.toString(),
+            formatCurrency(item.rate),
+            formatCurrency(item.tax_amount || 0),
+            formatCurrency(item.amount)
+          ])
+        : [[
+            invoice.description || 'Services Rendered',
+            '1',
+            formatCurrency(invoice.amount),
+            formatCurrency(invoice.tax_amount || 0),
+            formatCurrency(invoice.amount + (invoice.tax_amount || 0))
+          ]];
       
       autoTable(doc, {
         startY: 75,
@@ -213,7 +221,7 @@ export function InvoicesPage() {
       doc.text(`Page ${index + 1} of ${selectedInvoices.length}`, pageWidth - 14, 285, { align: 'right' });
     });
 
-    doc.save(`bulk_invoices_${new Date().toISOString().split('T')[0]}.pdf`);
+    doc.save(`bulk_invoices_${formatLocalDate()}.pdf`);
   };
 
   const confirmBulkDelete = () => {
@@ -243,9 +251,12 @@ export function InvoicesPage() {
   };
 
   const filteredInvoices = invoices.filter(invoice => {
-    const matchesSearch = invoice.client_name.toLowerCase().includes(searchQuery.toLowerCase()) || 
-                         invoice.id.toLowerCase().includes(searchQuery.toLowerCase());
-    const matchesStatus = statusFilter === 'All' || invoice.status === statusFilter;
+    const q = searchQuery.toLowerCase();
+    const matchesSearch = (invoice.client_name || '').toLowerCase().includes(q) || 
+                         (invoice.id || '').toLowerCase().includes(q);
+    const isOverdue = invoice.status !== 'Paid' && invoice.due_date < today;
+    const effectiveStatus = isOverdue ? 'Overdue' : invoice.status;
+    const matchesStatus = statusFilter === 'All' || effectiveStatus === statusFilter;
     const matchesDate = (!startDate || invoice.date >= startDate) && 
                        (!endDate || invoice.date <= endDate);
     
@@ -258,7 +269,7 @@ export function InvoicesPage() {
     const headers = ['Invoice ID', 'Client', 'Subtotal', 'Tax Rate (%)', 'Tax Amount', 'Total', 'Date', 'Due Date', 'Status', 'Description'];
     const rows = filteredInvoices.map(i => [
       i.id,
-      `"${i.client_name.replace(/"/g, '""')}"`,
+      `"${(i.client_name || '').replace(/"/g, '""')}"`,
       i.amount,
       i.tax_rate || 0,
       i.tax_amount || 0,
@@ -278,32 +289,42 @@ export function InvoicesPage() {
     const url = URL.createObjectURL(blob);
     const link = document.createElement('a');
     link.setAttribute('href', url);
-    link.setAttribute('download', `invoices_export_${new Date().toISOString().split('T')[0]}.csv`);
+    link.setAttribute('download', `invoices_export_${formatLocalDate()}.csv`);
     link.style.visibility = 'hidden';
     document.body.appendChild(link);
     link.click();
     document.body.removeChild(link);
+    URL.revokeObjectURL(url);
   };
 
   const currentMonth = today.substring(0, 7); // YYYY-MM
   
   const invoiceStats = invoices.reduce((acc, curr) => {
     const totalAmount = curr.amount + (curr.tax_amount || 0);
+    const paidFromHistory = (curr.payment_history || []).reduce((sum, p) => sum + p.amount, 0);
+    const remainingDue = Math.max(0, totalAmount - paidFromHistory);
     const isPaid = curr.status === 'Paid';
     const isThisMonth = curr.date.startsWith(currentMonth);
+    const paidInHistoryThisMonth = (curr.payment_history || [])
+      .filter(p => p.date.startsWith(currentMonth))
+      .reduce((sum, p) => sum + p.amount, 0);
     
     acc.totalInvoiced += totalAmount;
     acc.totalTax += (curr.tax_amount || 0);
     
     if (isPaid) {
       acc.totalPaid += totalAmount;
-      if (isThisMonth) {
+      if (paidInHistoryThisMonth > 0) {
+        acc.paidThisMonth += paidInHistoryThisMonth;
+      } else if (isThisMonth) {
         acc.paidThisMonth += totalAmount;
       }
     } else {
-      acc.totalOutstanding += totalAmount;
+      acc.totalPaid += paidFromHistory;
+      acc.paidThisMonth += paidInHistoryThisMonth;
+      acc.totalOutstanding += remainingDue;
       if (curr.status === 'Overdue' || curr.due_date < today) {
-        acc.totalOverdue += totalAmount;
+        acc.totalOverdue += remainingDue;
       }
     }
     return acc;
@@ -427,6 +448,13 @@ export function InvoicesPage() {
               {isSelectionMode ? "Exit Selection" : "Select Multiple"}
             </button>
             <button 
+              onClick={handleExportCSV}
+              className="flex items-center gap-2 px-4 py-3 bg-white border border-slate-200 rounded-2xl text-sm font-bold text-slate-600 hover:bg-slate-50 transition-all shadow-sm"
+            >
+              <Download size={18} />
+              Export CSV
+            </button>
+            <button 
               onClick={() => setShowFilters(!showFilters)}
               className={cn(
                 "flex items-center gap-2 px-4 py-3 border rounded-2xl text-sm font-bold transition-all shadow-sm",
@@ -512,13 +540,13 @@ export function InvoicesPage() {
             <tbody className="divide-y divide-slate-100">
               {isLoading ? (
                 <tr>
-                  <td colSpan={9} className="px-6 py-20 text-center">
+                  <td colSpan={isSelectionMode ? 10 : 9} className="px-6 py-20 text-center">
                     <div className="w-8 h-8 border-4 border-brand-500 border-t-transparent rounded-full animate-spin mx-auto" />
                   </td>
                 </tr>
               ) : filteredInvoices.length === 0 ? (
                 <tr>
-                  <td colSpan={9} className="px-6 py-20 text-center">
+                  <td colSpan={isSelectionMode ? 10 : 9} className="px-6 py-20 text-center">
                     <div className="flex flex-col items-center justify-center space-y-4">
                       <div className="w-16 h-16 bg-slate-50 rounded-3xl flex items-center justify-center text-slate-300">
                         <FileText size={32} />
@@ -697,7 +725,7 @@ interface InvoiceModalProps {
 export function InvoiceDetailsModal({ isOpen, onClose, invoice, onEdit, onUpdate }: { isOpen: boolean; onClose: () => void; invoice: Invoice | null; onEdit: (invoice: Invoice) => void; onUpdate?: () => void }) {
   const [isAddingPayment, setIsAddingPayment] = useState(false);
   const [newPayment, setNewPayment] = useState({
-    date: new Date().toISOString().split('T')[0],
+    date: formatLocalDate(),
     amount: 0,
     method: 'Bank Transfer',
     note: ''
@@ -707,7 +735,9 @@ export function InvoiceDetailsModal({ isOpen, onClose, invoice, onEdit, onUpdate
 
   const totalAmount = invoice.amount + (invoice.tax_amount || 0);
   const totalPaid = (invoice.payment_history || []).reduce((sum, p) => sum + p.amount, 0);
-  const remainingBalance = totalAmount - totalPaid;
+  const remainingBalance = Math.max(0, totalAmount - totalPaid);
+  const todayStr = formatLocalDate();
+  const displayStatus = invoice.status !== 'Paid' && invoice.due_date < todayStr ? 'Overdue' : invoice.status;
 
   const handleAddPayment = () => {
     if (newPayment.amount <= 0) return;
@@ -729,7 +759,7 @@ export function InvoiceDetailsModal({ isOpen, onClose, invoice, onEdit, onUpdate
     dataService.saveInvoice(updatedInvoice);
     setIsAddingPayment(false);
     setNewPayment({
-      date: new Date().toISOString().split('T')[0],
+      date: formatLocalDate(),
       amount: 0,
       method: 'Bank Transfer',
       note: ''
@@ -761,13 +791,22 @@ export function InvoiceDetailsModal({ isOpen, onClose, invoice, onEdit, onUpdate
     doc.text(invoice.client_name, 14, 62);
     
     // Line Items Table
-    const tableData = (invoice.line_items || []).map(item => [
-      item.description,
-      item.quantity.toString(),
-      formatCurrency(item.rate),
-      formatCurrency(item.tax_amount || 0),
-      formatCurrency(item.amount)
-    ]);
+    const items = invoice.line_items || [];
+    const tableData = items.length > 0
+      ? items.map(item => [
+          item.description,
+          item.quantity.toString(),
+          formatCurrency(item.rate),
+          formatCurrency(item.tax_amount || 0),
+          formatCurrency(item.amount)
+        ])
+      : [[
+          invoice.description || 'Services Rendered',
+          '1',
+          formatCurrency(invoice.amount),
+          formatCurrency(invoice.tax_amount || 0),
+          formatCurrency(invoice.amount + (invoice.tax_amount || 0))
+        ]];
     
     autoTable(doc, {
       startY: 75,
@@ -849,11 +888,11 @@ export function InvoiceDetailsModal({ isOpen, onClose, invoice, onEdit, onUpdate
               <div className="flex items-center gap-4">
                 <span className={cn(
                   "px-3 py-1 rounded-full text-[10px] font-black uppercase tracking-wider",
-                  invoice.status === 'Paid' ? "bg-brand-50 text-brand-700" :
-                  invoice.status === 'Unpaid' ? "bg-accent-50 text-accent-700" :
+                  displayStatus === 'Paid' ? "bg-brand-50 text-brand-700" :
+                  displayStatus === 'Unpaid' ? "bg-accent-50 text-accent-700" :
                   "bg-rose-50 text-rose-700"
                 )}>
-                  {invoice.status}
+                  {displayStatus}
                 </span>
                 <button 
                   onClick={() => {
@@ -1098,8 +1137,8 @@ export function InvoiceModal({ isOpen, onClose, onSave, initialData, defaultTaxR
     amount: 0,
     tax_rate: defaultTaxRate,
     tax_amount: 0,
-    date: new Date().toISOString().split('T')[0],
-    due_date: new Date(Date.now() + 30 * 24 * 60 * 60 * 1000).toISOString().split('T')[0],
+    date: formatLocalDate(),
+    due_date: formatLocalDate(new Date(Date.now() + 30 * 24 * 60 * 60 * 1000)),
     status: 'Unpaid',
     description: '',
     line_items: [],
@@ -1137,8 +1176,8 @@ export function InvoiceModal({ isOpen, onClose, onSave, initialData, defaultTaxR
         amount: 0,
         tax_rate: defaultTaxRate,
         tax_amount: 0,
-        date: new Date().toISOString().split('T')[0],
-        due_date: new Date(Date.now() + 30 * 24 * 60 * 60 * 1000).toISOString().split('T')[0],
+        date: formatLocalDate(),
+        due_date: formatLocalDate(new Date(Date.now() + 30 * 24 * 60 * 60 * 1000)),
         status: 'Unpaid',
         description: '',
         line_items: [],

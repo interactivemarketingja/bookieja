@@ -4,14 +4,9 @@ import {
   Users, 
   TrendingUp, 
   Percent, 
-  Calendar, 
   Download,
-  Filter,
   Plus,
-  Trash2,
   FileText,
-  Receipt,
-  Target,
   Settings
 } from 'lucide-react';
 import { 
@@ -34,6 +29,7 @@ import { DataSourcesPage } from './components/DataSourcesPage';
 import { SettingsPage } from './components/SettingsPage';
 import { SecuritySettingsPage } from './components/SecuritySettingsPage';
 import { AuthPage } from './components/AuthPage';
+import { LandingPage } from './components/LandingPage';
 import { DataVisualisationPage } from './components/DataVisualisationPage';
 import { DataImportPage } from './components/DataImportPage';
 import { InvoicesPage, InvoiceModal } from './components/InvoicesPage';
@@ -51,14 +47,15 @@ import { TransactionModal } from './components/TransactionModal';
 import { CategoryManagementModal } from './components/CategoryManagementModal';
 import { ConfirmationModal } from './components/ConfirmationModal';
 import { TopBar, SettingsSection } from './components/TopBar';
-import { MOCK_DATA, CHART_DATA } from './constants';
 import { dataService } from './services/dataService';
 import { supabase, isSupabaseConfigured } from './lib/supabase';
 import { DataRecord, BudgetCategory, Budget, Expense, Client, Account, JournalEntry } from './types';
-import { formatCurrency } from './lib/utils';
+import { formatCurrency, parseLocalDate, formatLocalDate } from './lib/utils';
 
 export default function App() {
   const [user, setUser] = useState<any>(null);
+  const [publicView, setPublicView] = useState<'landing' | 'auth'>('landing');
+  const [authInitialMode, setAuthInitialMode] = useState<'login' | 'signup'>('login');
   const [isAuthLoading, setIsAuthLoading] = useState<boolean>(isSupabaseConfigured);
   const [isPasswordRecovery, setIsPasswordRecovery] = useState<boolean>(false);
   const [activePage, setActivePage] = useState<PageId>('dashboard');
@@ -106,21 +103,38 @@ export default function App() {
     if (isSupabaseConfigured && supabase) {
       let isMounted = true;
 
-      supabase.auth.getSession().then(async ({ data: { session } }) => {
-        if (!isMounted) return;
-        if (session?.user) {
-          try {
-            const profile = await dataService.syncFromSupabase(session.user.id, session.user);
-            if (isMounted) {
-              setUser(profile);
+      supabase.auth
+        .getSession()
+        .then(async ({ data: { session } }) => {
+          if (!isMounted) return;
+          if (session?.user) {
+            try {
+              const profile = await dataService.syncFromSupabase(session.user.id, session.user);
+              if (isMounted) {
+                setUser(profile);
+                loadAllLocalData();
+              }
+            } catch (err) {
+              console.error('Failed to sync Supabase data:', err);
+            }
+          } else {
+            const localUser = dataService.getUser();
+            if (localUser?.authMode === 'local' && isMounted) {
+              setUser(localUser);
               loadAllLocalData();
             }
-          } catch (err) {
-            console.error('Failed to sync Supabase data:', err);
           }
-        }
-        if (isMounted) setIsAuthLoading(false);
-      });
+          if (isMounted) setIsAuthLoading(false);
+        })
+        .catch(() => {
+          if (!isMounted) return;
+          const localUser = dataService.getUser();
+          if (localUser?.authMode === 'local') {
+            setUser(localUser);
+            loadAllLocalData();
+          }
+          setIsAuthLoading(false);
+        });
 
       const {
         data: { subscription },
@@ -130,10 +144,17 @@ export default function App() {
           setIsPasswordRecovery(true);
           return;
         }
-        if (event === 'SIGNED_OUT' || !session?.user) {
+        if (event === 'SIGNED_OUT') {
           dataService.clearSession();
           setIsPasswordRecovery(false);
           setUser(null);
+        } else if (!session?.user) {
+          const localUser = dataService.getUser();
+          if (localUser?.authMode !== 'local') {
+            dataService.clearSession();
+            setIsPasswordRecovery(false);
+            setUser(null);
+          }
         } else if (session?.user && dataService.getActiveUserId() !== session.user.id) {
           const profile = await dataService.syncFromSupabase(session.user.id, session.user);
           if (isMounted) {
@@ -149,15 +170,11 @@ export default function App() {
         subscription.unsubscribe();
       };
     } else {
-      const savedUser = dataService.getUser() || {
-        name: 'John Doe',
-        email: 'john@islandbookkeeping.com',
-        role: 'Business Owner',
-        company: 'Island Tech Solutions',
-        photo: '',
-      };
-      setUser(savedUser);
-      loadAllLocalData();
+      const savedUser = dataService.getUser();
+      if (savedUser) {
+        setUser(savedUser);
+        loadAllLocalData();
+      }
 
       return () => {
         window.removeEventListener('island-data-synced', handleSynced);
@@ -167,7 +184,7 @@ export default function App() {
 
   const fetchSettings = () => {
     const settings = dataService.getSettings();
-    if (settings.tax_rate) {
+    if (settings.tax_rate != null) {
       setTaxRate(Number(settings.tax_rate));
     }
   };
@@ -266,19 +283,34 @@ export default function App() {
     loadAllLocalData();
   };
 
+  const handleLaunchDemo = () => {
+    handleLogin({
+      name: 'Kareem Campbell',
+      email: 'finance@bluemountainlogistics.com',
+      role: 'Business Owner',
+      company: 'Blue Mountain Logistics Ltd.',
+      photo: '',
+    });
+  };
+
   const handleLogout = async () => {
     if (isSupabaseConfigured && supabase) {
-      await supabase.auth.signOut();
+      try {
+        await supabase.auth.signOut();
+      } catch (err) {
+        console.warn('Supabase signOut skipped:', err);
+      }
     }
     dataService.clearSession();
     setUser(null);
+    setPublicView('landing');
   };
 
   const exportToCSV = (filters: ExportFilters) => {
     const filteredData = transactions.filter(d => {
-      const date = new Date(d.date);
-      const start = filters.startDate ? new Date(filters.startDate) : null;
-      const end = filters.endDate ? new Date(filters.endDate) : null;
+      const date = parseLocalDate(d.date);
+      const start = filters.startDate ? parseLocalDate(filters.startDate) : null;
+      const end = filters.endDate ? parseLocalDate(filters.endDate) : null;
       
       const isWithinDateRange = (!start || date >= start) && (!end || date <= end);
       const isStatusMatch = filters.statuses.includes(d.status);
@@ -312,18 +344,13 @@ export default function App() {
     const url = URL.createObjectURL(blob);
     const link = document.createElement('a');
     link.setAttribute('href', url);
-    link.setAttribute('download', `island_bookkeeping_ledger_${new Date().toISOString().split('T')[0]}.csv`);
+    link.setAttribute('download', `island_bookkeeping_ledger_${formatLocalDate()}.csv`);
     link.style.visibility = 'hidden';
     document.body.appendChild(link);
     link.click();
     document.body.removeChild(link);
+    URL.revokeObjectURL(url);
   };
-
-  useEffect(() => {
-    if (user && activePage === 'dashboard') {
-      // Data loaded
-    }
-  }, [user, activePage]);
 
   if (isAuthLoading) {
     return (
@@ -349,7 +376,30 @@ export default function App() {
   }
 
   if (!user) {
-    return <AuthPage onLogin={handleLogin} />;
+    if (publicView === 'auth') {
+      return (
+        <AuthPage
+          initialMode={authInitialMode}
+          onLogin={handleLogin}
+          onBackToHome={() => setPublicView('landing')}
+        />
+      );
+    }
+
+    return (
+      <LandingPage
+        onGetStarted={() => {
+          setAuthInitialMode('signup');
+          setPublicView('auth');
+        }}
+        onSignIn={() => {
+          setAuthInitialMode('login');
+          setPublicView('auth');
+        }}
+        onLaunchDemo={handleLaunchDemo}
+        isDemoAvailable={!isSupabaseConfigured}
+      />
+    );
   }
 
   const totalRevenue = transactions.reduce((acc, curr) => acc + curr.revenue, 0);
@@ -406,7 +456,7 @@ export default function App() {
         return <ReportsPage />;
       default:
         const monthlyData = transactions.reduce((acc: any[], curr) => {
-          const month = new Date(curr.date).toLocaleString('default', { month: 'short' });
+          const month = parseLocalDate(curr.date).toLocaleString('default', { month: 'short' });
           const existing = acc.find(d => d.name === month);
           if (existing) {
             existing.revenue += curr.revenue;
@@ -579,6 +629,7 @@ export default function App() {
           <TopBar
             user={user}
             activePage={activePage}
+            onUpdateUser={setUser}
             onNavigate={(page, section) => {
               if (section) setSettingsSection(section);
               setActivePage(page);
@@ -769,14 +820,51 @@ export default function App() {
         </main>
       </div>
 
-      <footer className="w-full bg-white border-t border-slate-200 py-3 px-8 flex flex-col sm:flex-row justify-between items-center gap-2 z-10">
-        <div className="flex items-center gap-2">
-          <div className="w-6 h-6 jamaica-gradient rounded-lg flex items-center justify-center text-white font-black text-[10px]">I</div>
-          <p className="text-[10px] font-black text-slate-400 uppercase tracking-widest">
+      <footer className="w-full bg-white border-t border-slate-200 py-3.5 px-6 sm:px-8 flex flex-col md:flex-row justify-between items-center gap-3 z-10">
+        <div className="flex items-center gap-2.5">
+          <div className="w-6 h-6 jamaica-gradient rounded-lg flex items-center justify-center text-white font-black text-[10px]">
+            I
+          </div>
+          <p className="text-xs font-bold text-black">
             Copyright @ 2026 Island Bookkeeping. All Rights Reserved.
           </p>
         </div>
-        <p className="text-[10px] font-black text-slate-400 uppercase tracking-widest">
+
+        <div className="flex flex-wrap items-center gap-5 text-xs font-semibold text-black">
+          <button
+            type="button"
+            onClick={() => setActivePage('reports')}
+            className="hover:text-brand-600 transition-colors cursor-pointer"
+          >
+            Financial Reports
+          </button>
+          <button
+            type="button"
+            onClick={() => setActivePage('accounts')}
+            className="hover:text-brand-600 transition-colors cursor-pointer"
+          >
+            Chart of Accounts
+          </button>
+          <button
+            type="button"
+            onClick={() => {
+              setSettingsSection('billing');
+              setActivePage('settings');
+            }}
+            className="hover:text-brand-600 transition-colors cursor-pointer"
+          >
+            Tax & Billing
+          </button>
+          <button
+            type="button"
+            onClick={() => setActivePage('security')}
+            className="hover:text-brand-600 transition-colors cursor-pointer"
+          >
+            Security
+          </button>
+        </div>
+
+        <p className="text-xs font-bold text-black">
           Developed by <span className="text-brand-600">Island Web Consultants</span>
         </p>
       </footer>

@@ -30,7 +30,7 @@ import {
   Area
 } from 'recharts';
 import { Budget, Expense, BudgetCategory } from '../types';
-import { cn, formatCurrency } from '../lib/utils';
+import { cn, formatCurrency, parseLocalDate, formatLocalDate } from '../lib/utils';
 import { dataService } from '../services/dataService';
 import { CategoryManagementModal } from './CategoryManagementModal';
 import { ConfirmationModal } from './ConfirmationModal';
@@ -98,7 +98,7 @@ export function BudgetsPage({ onEdit }: { onEdit: (budget: Budget) => void }) {
     const spent = expenses
       .filter(e => {
         if (e.category !== category) return false;
-        const expDate = new Date(e.date);
+        const expDate = parseLocalDate(e.date);
         if (period === 'Monthly') {
           return expDate.getMonth() === now.getMonth() && expDate.getFullYear() === now.getFullYear();
         } else if (period === 'Quarterly') {
@@ -112,7 +112,7 @@ export function BudgetsPage({ onEdit }: { onEdit: (budget: Budget) => void }) {
       })
       .reduce((acc, curr) => acc + curr.amount, 0);
     
-    const percentage = (spent / limit) * 100;
+    const percentage = limit > 0 ? (spent / limit) * 100 : 0;
     const remaining = limit - spent;
     
     // Calculate days remaining and daily average
@@ -123,7 +123,7 @@ export function BudgetsPage({ onEdit }: { onEdit: (budget: Budget) => void }) {
       daysInPeriod = new Date(now.getFullYear(), now.getMonth() + 1, 0).getDate();
       dayOfPeriod = now.getDate();
     } else if (period === 'Quarterly') {
-      daysInPeriod = 90; // Approximation
+      daysInPeriod = 90;
       const startMonth = Math.floor(now.getMonth() / 3) * 3;
       const startDate = new Date(now.getFullYear(), startMonth, 1);
       dayOfPeriod = Math.floor((now.getTime() - startDate.getTime()) / (1000 * 60 * 60 * 24)) + 1;
@@ -136,7 +136,7 @@ export function BudgetsPage({ onEdit }: { onEdit: (budget: Budget) => void }) {
     const daysRemaining = Math.max(0, daysInPeriod - dayOfPeriod);
     const dailyAverage = dayOfPeriod > 0 ? spent / dayOfPeriod : 0;
     const projectedSpent = dailyAverage * daysInPeriod;
-    const projectedPercentage = (projectedSpent / limit) * 100;
+    const projectedPercentage = limit > 0 ? (projectedSpent / limit) * 100 : 0;
     const isProjectedOver = projectedSpent > limit;
     const dailyAllowance = daysRemaining > 0 ? Math.max(0, remaining / daysRemaining) : 0;
     
@@ -565,7 +565,7 @@ function BudgetDetailsModal({ budget, expenses, onClose, categories }: BudgetDet
   const filteredExpenses = expenses
     .filter(e => {
       if (e.category !== budget.category) return false;
-      const expDate = new Date(e.date);
+      const expDate = parseLocalDate(e.date);
       if (budget.period === 'Monthly') {
         return expDate.getMonth() === now.getMonth() && expDate.getFullYear() === now.getFullYear();
       } else if (budget.period === 'Quarterly') {
@@ -577,11 +577,11 @@ function BudgetDetailsModal({ budget, expenses, onClose, categories }: BudgetDet
       }
       return true;
     })
-    .sort((a, b) => new Date(b.date).getTime() - new Date(a.date).getTime());
+    .sort((a, b) => parseLocalDate(b.date).getTime() - parseLocalDate(a.date).getTime());
 
   const spent = filteredExpenses.reduce((acc, curr) => acc + curr.amount, 0);
   const remaining = budget.limit_amount - spent;
-  const actualPercentage = (spent / budget.limit_amount) * 100;
+  const actualPercentage = budget.limit_amount > 0 ? (spent / budget.limit_amount) * 100 : 0;
   const percentage = Math.min(actualPercentage, 100);
   const isOver = spent > budget.limit_amount;
   const isWarning = actualPercentage > 80 && spent <= budget.limit_amount;
@@ -612,17 +612,14 @@ function BudgetDetailsModal({ budget, expenses, onClose, categories }: BudgetDet
   overrunDate.setDate(now.getDate() + daysUntilLimit);
   const formattedOverrunDate = overrunDate.toLocaleDateString('en-US', { month: 'short', day: 'numeric' });
 
-  // Prepare chart data
+  // Prepare chart data using timezone-safe YYYY-MM-DD comparisons
   const chartData = Array.from({ length: dayOfPeriod }, (_, i) => {
     const date = new Date(now);
     date.setDate(now.getDate() - (dayOfPeriod - 1 - i));
-    const daySpent = filteredExpenses
-      .filter(e => new Date(e.date).toDateString() === date.toDateString())
-      .reduce((acc, curr) => acc + curr.amount, 0);
+    const dayStr = formatLocalDate(date);
     
-    // Cumulative spent
     const cumulativeSpent = filteredExpenses
-      .filter(e => new Date(e.date) <= date)
+      .filter(e => e.date <= dayStr)
       .reduce((acc, curr) => acc + curr.amount, 0);
 
     return {
@@ -732,7 +729,7 @@ function BudgetDetailsModal({ budget, expenses, onClose, categories }: BudgetDet
                     </div>
                     <div className="flex items-center gap-1.5">
                       <div className="w-2 h-2 rounded-full bg-rose-300" />
-                      <span className="text-[10px] font-black text-slate-400 uppercase tracking-widest">Forecast: {((projectedSpent / budget.limit_amount) * 100).toFixed(1)}%</span>
+                      <span className="text-[10px] font-black text-slate-400 uppercase tracking-widest">Forecast: {(budget.limit_amount > 0 ? (projectedSpent / budget.limit_amount) * 100 : 0).toFixed(1)}%</span>
                     </div>
                   </div>
                 </div>
@@ -741,7 +738,7 @@ function BudgetDetailsModal({ budget, expenses, onClose, categories }: BudgetDet
                     {isProjectedOver && (
                       <motion.div 
                         initial={{ width: 0 }}
-                        animate={{ width: `${Math.min((projectedSpent / budget.limit_amount) * 100, 100)}%` }}
+                        animate={{ width: `${Math.min(budget.limit_amount > 0 ? (projectedSpent / budget.limit_amount) * 100 : 0, 100)}%` }}
                         className="absolute inset-0 bg-rose-200/50 z-0"
                       />
                     )}

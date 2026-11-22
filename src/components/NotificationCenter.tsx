@@ -13,8 +13,13 @@ import { motion, AnimatePresence } from 'motion/react';
 import { dataService } from '../services/dataService';
 import { AppNotification } from '../types';
 import { cn } from '../lib/utils';
+import { PageId } from './Sidebar';
 
-export const NotificationCenter: React.FC = () => {
+interface NotificationCenterProps {
+  onNavigate?: (page: PageId) => void;
+}
+
+export const NotificationCenter: React.FC<NotificationCenterProps> = ({ onNavigate }) => {
   const [isOpen, setIsOpen] = useState(false);
   const [notifications, setNotifications] = useState<AppNotification[]>([]);
   const dropdownRef = useRef<HTMLDivElement>(null);
@@ -169,13 +174,21 @@ export const NotificationCenter: React.FC = () => {
                               </button>
                             )}
                             {notification.link && (
-                              <a 
-                                href={notification.link}
+                              <button
+                                type="button"
+                                onClick={() => {
+                                  if (!notification.isRead) {
+                                    handleMarkAsRead(notification.id);
+                                  }
+                                  setIsOpen(false);
+                                  const targetPage = notification.link!.replace(/^\//, '') as PageId;
+                                  onNavigate?.(targetPage);
+                                }}
                                 className="flex items-center gap-1 text-[9px] font-black text-slate-400 uppercase tracking-widest hover:text-brand-600 transition-colors"
                               >
                                 <ExternalLink size={10} />
                                 View Details
-                              </a>
+                              </button>
                             )}
                           </div>
                         </div>
@@ -200,16 +213,14 @@ export const NotificationCenter: React.FC = () => {
               )}
             </div>
 
-            {notifications.length > 0 && (
-              <div className="p-4 bg-slate-50/50 border-t border-slate-50 text-center">
-                <button 
-                  onClick={() => {
-                    // Could navigate to a full notifications page
-                    setIsOpen(false);
-                  }}
-                  className="text-[10px] font-black text-slate-400 uppercase tracking-widest hover:text-brand-600 transition-colors"
+            {notifications.length > 0 && unreadCount > 0 && (
+              <div className="p-3.5 bg-slate-50/50 border-t border-slate-50 text-center">
+                <button
+                  type="button"
+                  onClick={handleMarkAllAsRead}
+                  className="text-[10px] font-black text-slate-500 uppercase tracking-widest hover:text-brand-600 transition-colors"
                 >
-                  View All Activity
+                  Mark All as Read
                 </button>
               </div>
             )}

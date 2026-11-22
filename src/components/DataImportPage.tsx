@@ -4,16 +4,16 @@ import { useDropzone } from 'react-dropzone';
 import { 
   Upload, 
   FileText, 
-  X, 
   Check, 
   AlertCircle, 
   Wand2, 
   Trash2, 
-  Table as TableIcon,
   ArrowRight,
-  Shield
+  Shield,
+  CheckCircle2,
+  Sparkles
 } from 'lucide-react';
-import { cn } from '../lib/utils';
+import { cn, formatCurrency, formatLocalDate } from '../lib/utils';
 import { dataService } from '../services/dataService';
 import { Expense } from '../types';
 
@@ -68,105 +68,206 @@ const CATEGORY_KEYWORDS: Record<string, string> = {
 };
 
 function parseAndNormalizeDate(dateStr: string): { normalized: string; error?: string } {
-  // Try YYYY-MM-DD
-  if (/^\d{4}-\d{2}-\d{2}$/.test(dateStr)) return { normalized: dateStr };
+  const trimmed = (dateStr || '').trim();
+  if (!trimmed) return { normalized: trimmed, error: 'Missing date' };
+
+  if (/^\d{4}-\d{2}-\d{2}$/.test(trimmed)) return { normalized: trimmed };
   
-  // Try MM/DD/YYYY or DD/MM/YYYY
-  const parts = dateStr.split(/[\/\-]/);
+  const parts = trimmed.split(/[\/\-]/);
   if (parts.length === 3) {
-    let month, day, year;
-    if (parts[0].length === 4) { // YYYY/MM/DD
-      [year, month, day] = parts;
-    } else if (parts[2].length === 4) { // MM/DD/YYYY or DD/MM/YYYY
-      // Defaulting to MM/DD/YYYY for simplicity in this demo, but could be smarter
-      [month, day, year] = parts;
+    let year: number, month: number, day: number;
+    if (parts[0].length === 4) {
+      year = parseInt(parts[0], 10);
+      month = parseInt(parts[1], 10);
+      day = parseInt(parts[2], 10);
+    } else if (parts[2].length === 4) {
+      month = parseInt(parts[0], 10);
+      day = parseInt(parts[1], 10);
+      year = parseInt(parts[2], 10);
+      if (month > 12 && day <= 12) {
+        const tmp = month;
+        month = day;
+        day = tmp;
+      }
     } else {
-      return { normalized: dateStr, error: 'Ambiguous date format' };
+      return { normalized: trimmed, error: 'Ambiguous date format' };
     }
     
-    const d = new Date(`${year}-${month.padStart(2, '0')}-${day.padStart(2, '0')}`);
-    if (!isNaN(d.getTime())) {
-      return { normalized: d.toISOString().split('T')[0] };
+    const d = new Date(year, month - 1, day);
+    if (!isNaN(d.getTime()) && d.getFullYear() === year && d.getMonth() === month - 1 && d.getDate() === day) {
+      return { normalized: formatLocalDate(d) };
     }
   }
   
-  return { normalized: dateStr, error: 'Invalid date format' };
+  return { normalized: trimmed, error: 'Invalid date format' };
 }
 
 function suggestCategory(description: string): string | null {
-  const desc = description.toLowerCase();
+  const desc = (description || '').toLowerCase();
   for (const [keyword, category] of Object.entries(CATEGORY_KEYWORDS)) {
     if (desc.includes(keyword)) return category;
   }
   return null;
 }
 
+function parseCSVLine(line: string): string[] {
+  const result: string[] = [];
+  let current = '';
+  let inQuotes = false;
+  for (let i = 0; i < line.length; i++) {
+    const ch = line[i];
+    if (ch === '"') {
+      if (inQuotes && line[i + 1] === '"') {
+        current += '"';
+        i++;
+      } else {
+        inQuotes = !inQuotes;
+      }
+    } else if (ch === ',' && !inQuotes) {
+      result.push(current.trim());
+      current = '';
+    } else {
+      current += ch;
+    }
+  }
+  result.push(current.trim());
+  return result;
+}
+
+function processRawRows(rawData: { id: string; date: string; description: string; amount: number; category: string }[]): ImportedRow[] {
+  return rawData.map((row, _, arr) => {
+    const dateResult = parseAndNormalizeDate(row.date);
+    const categorySuggestion = row.category ? null : suggestCategory(row.description);
+    
+    const errors: ImportError[] = [];
+    const suggestions: ImportedRow['suggestions'] = [];
+
+    if (dateResult.error) {
+      errors.push({ field: 'date', message: dateResult.error });
+    } else if (dateResult.normalized !== row.date) {
+      suggestions.push({ field: 'date', value: dateResult.normalized, reason: 'Standardized format' });
+    }
+
+    if (!row.category) {
+      if (categorySuggestion) {
+        suggestions.push({ field: 'category', value: categorySuggestion, reason: 'Matched keyword' });
+      } else {
+        errors.push({ field: 'category', message: 'Missing category' });
+      }
+    }
+
+    if (isNaN(row.amount) || row.amount <= 0) {
+      errors.push({ field: 'amount', message: 'Invalid amount' });
+    }
+
+    const isDuplicate = arr.filter(r => r.description === row.description && r.amount === row.amount && r.date === row.date).length > 1;
+    if (isDuplicate) {
+      errors.push({ field: 'description', message: 'Potential duplicate' });
+    }
+
+    return {
+      ...row,
+      status: (errors.length > 0 || suggestions.length > 0) ? 'dirty' : 'clean',
+      errors,
+      suggestions
+    };
+  });
+}
+
 export function DataImportPage() {
-  const [files, setFiles] = useState<File[]>([]);
   const [data, setData] = useState<ImportedRow[]>([]);
   const [isProcessing, setIsProcessing] = useState(false);
   const [step, setStep] = useState<'upload' | 'clean'>('upload');
+  const [statusBanner, setStatusBanner] = useState<{ type: 'success' | 'error'; message: string } | null>(null);
+  const [fileName, setFileName] = useState<string>('');
 
-  const onDrop = useCallback((acceptedFiles: File[]) => {
-    setFiles(acceptedFiles);
+  const handleParsedRows = (rawRows: { id: string; date: string; description: string; amount: number; category: string }[], label: string) => {
+    if (rawRows.length === 0) {
+      setStatusBanner({ type: 'error', message: `No valid rows found in "${label}". Expected CSV headers: Date, Description, Amount, Category.` });
+      setIsProcessing(false);
+      return;
+    }
+    setFileName(label);
+    setData(processRawRows(rawRows));
+    setIsProcessing(false);
+    setStep('clean');
+  };
+
+  const onDrop = useCallback(async (acceptedFiles: File[]) => {
+    const file = acceptedFiles[0];
+    if (!file) return;
+    setStatusBanner(null);
     setIsProcessing(true);
-    
-    // Simulate parsing and initial validation
-    setTimeout(() => {
-      const rawData = [
-        { id: '1', date: '2024-05-01', description: 'Office Supplies', amount: 150.00, category: 'Expenses' },
-        { id: '2', date: '05/02/2024', description: 'Client Lunch at Usain Bolt\'s Tracks & Records', amount: 85.50, category: '' },
-        { id: '3', date: '2024-05-03', description: 'Monthly AWS Cloud Subscription', amount: 29.99, category: '' },
-        { id: '4', date: '2024-05-03', description: 'Monthly AWS Cloud Subscription', amount: 29.99, category: 'Software' },
-        { id: '5', date: '2024-05-04', description: 'Consulting Fee - Project Alpha', amount: 1200.00, category: 'Revenue' },
-        { id: '6', date: 'invalid-date', description: 'JPS Electricity Bill', amount: 450.00, category: 'Utilities' },
-      ];
 
-        const processedData: ImportedRow[] = rawData.map(row => {
-          const dateResult = parseAndNormalizeDate(row.date);
-          const categorySuggestion = row.category ? null : suggestCategory(row.description);
-          
-          const errors: ImportError[] = [];
-          const suggestions: ImportedRow['suggestions'] = [];
+    try {
+      const lower = file.name.toLowerCase();
+      if (lower.endsWith('.json')) {
+        const text = await file.text();
+        const parsed = JSON.parse(text);
+        const list = Array.isArray(parsed) ? parsed : (Array.isArray(parsed?.records) ? parsed.records : []);
+        const rawRows = list.map((item: any, idx: number) => ({
+          id: `IMP-${Date.now()}-${idx}`,
+          date: String(item.date || item.Date || ''),
+          description: String(item.description || item.Description || item.memo || item.Memo || item.name || item.Name || 'Imported Item'),
+          amount: Math.abs(parseFloat(String(item.amount ?? item.Amount ?? item.total ?? 0).replace(/[^0-9.\-]/g, '')) || 0),
+          category: String(item.category || item.Category || '')
+        }));
+        handleParsedRows(rawRows, file.name);
+      } else if (lower.endsWith('.csv')) {
+        const text = await file.text();
+        const lines = text.split(/\r?\n/).filter(l => l.trim().length > 0);
+        if (lines.length < 2) {
+          setStatusBanner({ type: 'error', message: 'CSV file must include a header row and at least one data row.' });
+          setIsProcessing(false);
+          return;
+        }
+        const headers = parseCSVLine(lines[0]).map(h => h.toLowerCase().trim());
+        const dateIdx = headers.findIndex(h => h.includes('date'));
+        const descIdx = headers.findIndex(h => h.includes('desc') || h.includes('memo') || h.includes('name') || h.includes('item'));
+        const amtIdx = headers.findIndex(h => h.includes('amount') || h.includes('total') || h.includes('value') || h.includes('price'));
+        const catIdx = headers.findIndex(h => h.includes('cat'));
 
-          if (dateResult.error) {
-            errors.push({ field: 'date', message: dateResult.error });
-          } else if (dateResult.normalized !== row.date) {
-            suggestions.push({ field: 'date', value: dateResult.normalized, reason: 'Standardized format' });
-          }
-
-          if (!row.category) {
-            if (categorySuggestion) {
-              suggestions.push({ field: 'category', value: categorySuggestion, reason: 'Matched keyword' });
-            } else {
-              errors.push({ field: 'category', message: 'Missing category' });
-            }
-          }
-
-          const isDuplicate = rawData.filter(r => r.description === row.description && r.amount === row.amount && r.date === row.date).length > 1;
-          if (isDuplicate) {
-            errors.push({ field: 'description', message: 'Potential duplicate' });
-          }
-
+        const rawRows = lines.slice(1).map((line, idx) => {
+          const cols = parseCSVLine(line);
+          const rawDate = dateIdx >= 0 ? cols[dateIdx] : cols[0] || '';
+          const rawDesc = descIdx >= 0 ? cols[descIdx] : cols[1] || 'Imported Item';
+          const rawAmt = amtIdx >= 0 ? cols[amtIdx] : cols[2] || '0';
+          const rawCat = catIdx >= 0 ? cols[catIdx] : cols[3] || '';
           return {
-            ...row,
-            status: (errors.length > 0 || suggestions.length > 0) ? 'dirty' : 'clean',
-            errors,
-            suggestions
+            id: `IMP-${Date.now()}-${idx}`,
+            date: rawDate,
+            description: rawDesc,
+            amount: Math.abs(parseFloat(rawAmt.replace(/[^0-9.\-]/g, '')) || 0),
+            category: rawCat
           };
         });
-
-      setData(processedData);
+        handleParsedRows(rawRows, file.name);
+      } else {
+        setStatusBanner({ type: 'error', message: 'Unsupported file format. Please upload a .csv or .json file.' });
+        setIsProcessing(false);
+      }
+    } catch (err) {
+      setStatusBanner({ type: 'error', message: `Failed to parse "${file.name}": ${(err as Error).message}` });
       setIsProcessing(false);
-      setStep('clean');
-    }, 1500);
+    }
   }, []);
+
+  const handleLoadSample = () => {
+    setStatusBanner(null);
+    const sampleRows = [
+      { id: `SMP-1`, date: '2025-02-01', description: 'Office Supplies', amount: 150.00, category: 'Expenses' },
+      { id: `SMP-2`, date: '02/02/2025', description: 'Client Lunch at Tracks & Records', amount: 85.50, category: '' },
+      { id: `SMP-3`, date: '2025-02-03', description: 'Monthly AWS Cloud Subscription', amount: 29.99, category: '' },
+      { id: `SMP-4`, date: '2025-02-03', description: 'Monthly AWS Cloud Subscription', amount: 29.99, category: 'Software' },
+      { id: `SMP-5`, date: 'invalid-date', description: 'JPS Electricity Bill', amount: 450.00, category: 'Utilities' },
+    ];
+    handleParsedRows(sampleRows, 'sample_statement.csv');
+  };
 
   const { getRootProps, getInputProps, isDragActive } = useDropzone({ 
     onDrop,
     accept: {
       'text/csv': ['.csv'],
-      'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet': ['.xlsx'],
       'application/json': ['.json']
     },
     multiple: false
@@ -175,18 +276,23 @@ export function DataImportPage() {
   const handleAutoClean = () => {
     setIsProcessing(true);
     setTimeout(() => {
+      const todayStr = formatLocalDate();
       setData(prev => {
         const cleaned = prev.map(row => {
-          let newRow = { ...row };
+          const newRow = { ...row };
           
-          // Apply suggestions
           if (row.suggestions) {
             row.suggestions.forEach(s => {
               (newRow as any)[s.field] = s.value;
             });
           }
 
-          // Final fallback for missing category
+          if (!parseAndNormalizeDate(newRow.date).error) {
+            newRow.date = parseAndNormalizeDate(newRow.date).normalized;
+          } else {
+            newRow.date = todayStr;
+          }
+
           if (!newRow.category) {
             newRow.category = 'Uncategorized';
           }
@@ -199,13 +305,12 @@ export function DataImportPage() {
           };
         });
 
-        // Deduplicate
         return cleaned.filter((row, index, self) => 
           index === self.findIndex((t) => t.description === row.description && t.amount === row.amount && t.date === row.date)
         );
       });
       setIsProcessing(false);
-    }, 1500);
+    }, 300);
   };
 
   const applySuggestion = (rowId: string, field: keyof ImportedRow) => {
@@ -235,6 +340,8 @@ export function DataImportPage() {
       if (row.id !== rowId) return row;
       return {
         ...row,
+        date: parseAndNormalizeDate(row.date).error ? formatLocalDate() : parseAndNormalizeDate(row.date).normalized,
+        category: row.category || 'Uncategorized',
         status: 'fixed',
         errors: [],
         suggestions: []
@@ -250,29 +357,27 @@ export function DataImportPage() {
     if (data.length === 0) return;
     
     setIsProcessing(true);
+    const todayStr = formatLocalDate();
     
-    // Convert imported rows to Expense objects
-    const expenses: Expense[] = data.map(row => ({
-      id: Math.random().toString(36).substr(2, 9),
-      date: row.date,
+    const expenses: Expense[] = data.map((row, idx) => ({
+      id: `EXP-${Date.now()}-${idx}`,
+      date: parseAndNormalizeDate(row.date).error ? todayStr : parseAndNormalizeDate(row.date).normalized,
       description: row.description,
-      amount: row.amount,
+      amount: Number(row.amount) || 0,
       category: row.category || 'Uncategorized',
-      status: 'Paid' // Default to Paid for imports
+      status: 'Paid'
     }));
 
-    // Save each expense
     expenses.forEach(expense => {
       dataService.saveExpense(expense);
     });
+    window.dispatchEvent(new CustomEvent('island-data-synced'));
 
-    setTimeout(() => {
-      setIsProcessing(false);
-      alert(`Successfully imported ${expenses.length} records!`);
-      setStep('upload');
-      setData([]);
-      setFiles([]);
-    }, 1000);
+    setIsProcessing(false);
+    setStatusBanner({ type: 'success', message: `Successfully imported ${expenses.length} expense records into your ledger.` });
+    setStep('upload');
+    setData([]);
+    setFileName('');
   };
 
   return (
@@ -284,12 +389,20 @@ export function DataImportPage() {
       <header className="flex justify-between items-end">
         <div>
           <h1 className="text-3xl font-bold text-slate-900 tracking-tight">Data Import & Cleaning</h1>
-          <p className="text-slate-500 mt-1">Upload your financial statements and clean your data</p>
+          <p className="text-slate-500 mt-1">
+            {step === 'clean' && fileName
+              ? `Reviewing parsed records from ${fileName}`
+              : 'Upload your financial CSV or JSON statements and clean your data'}
+          </p>
         </div>
         {step === 'clean' && (
           <div className="flex items-center gap-3">
             <button 
-              onClick={() => setStep('upload')}
+              onClick={() => {
+                setStep('upload');
+                setData([]);
+                setFileName('');
+              }}
               className="px-4 py-2 text-slate-600 font-medium hover:bg-slate-100 rounded-xl transition-all"
             >
               Cancel
@@ -299,12 +412,24 @@ export function DataImportPage() {
               disabled={isProcessing}
               className="flex items-center gap-2 px-4 py-2 bg-brand-600 text-white rounded-xl text-sm font-medium hover:bg-brand-700 transition-all disabled:opacity-50"
             >
-              {isProcessing ? <Wand2 size={18} className="animate-spin" /> : <Wand2 size={18} />}
+              <Wand2 size={18} className={isProcessing ? "animate-spin" : ""} />
               Auto-Clean Data
             </button>
           </div>
         )}
       </header>
+
+      {statusBanner && (
+        <div className={cn(
+          "p-4 rounded-2xl border flex items-center gap-3 text-sm font-bold",
+          statusBanner.type === 'success'
+            ? "bg-emerald-50 border-emerald-200 text-emerald-700"
+            : "bg-rose-50 border-rose-200 text-rose-700"
+        )}>
+          {statusBanner.type === 'success' ? <CheckCircle2 size={18} /> : <AlertCircle size={18} />}
+          <span>{statusBanner.message}</span>
+        </div>
+      )}
 
       <AnimatePresence mode="wait">
         {step === 'upload' ? (
@@ -313,7 +438,7 @@ export function DataImportPage() {
             initial={{ opacity: 0, scale: 0.95 }}
             animate={{ opacity: 1, scale: 1 }}
             exit={{ opacity: 0, scale: 0.95 }}
-            className="max-w-3xl mx-auto"
+            className="max-w-3xl mx-auto space-y-6"
           >
             <div 
               {...getRootProps()} 
@@ -330,22 +455,29 @@ export function DataImportPage() {
                 {isDragActive ? "Drop your file here" : "Upload your financial data"}
               </h3>
               <p className="text-slate-500 mb-8 max-w-sm mx-auto">
-                Drag and drop your CSV, Excel, or JSON files. We'll automatically detect the format and prepare it for cleaning.
+                Drag and drop your CSV or JSON statement files. Include Date, Description, Amount, and optional Category columns.
               </p>
               <div className="flex items-center justify-center gap-6 text-slate-400">
                 <div className="flex items-center gap-2">
                   <FileText size={16} />
-                  <span className="text-xs font-medium">CSV</span>
-                </div>
-                <div className="flex items-center gap-2">
-                  <TableIcon size={16} />
-                  <span className="text-xs font-medium">Excel</span>
+                  <span className="text-xs font-medium">CSV & JSON</span>
                 </div>
                 <div className="flex items-center gap-2">
                   <Shield size={16} />
-                  <span className="text-xs font-medium">Secure</span>
+                  <span className="text-xs font-medium">Local Parsing</span>
                 </div>
               </div>
+            </div>
+
+            <div className="flex justify-center">
+              <button
+                type="button"
+                onClick={handleLoadSample}
+                className="inline-flex items-center gap-2 px-5 py-2.5 bg-white border border-slate-200 rounded-xl text-xs font-bold text-slate-600 hover:bg-slate-50 transition-all shadow-sm"
+              >
+                <Sparkles size={14} className="text-brand-600" />
+                Try with Sample Statement Data
+              </button>
             </div>
           </motion.div>
         ) : (
@@ -386,7 +518,7 @@ export function DataImportPage() {
                                   rowErrors.some(e => e.field === 'date') ? "bg-rose-100 text-rose-700 font-bold" : 
                                   rowSuggestions.some(s => s.field === 'date') ? "bg-brand-50 text-brand-700 font-bold" : "text-slate-600 font-medium"
                                 )}>
-                                  {row.date}
+                                  {row.date || 'Missing'}
                                 </div>
                                 {rowSuggestions.find(s => s.field === 'date') && (
                                   <button 
@@ -416,7 +548,7 @@ export function DataImportPage() {
                               </div>
                             </td>
                             <td className="px-6 py-4">
-                              <span className="text-sm text-slate-600 font-bold">${row.amount.toFixed(2)}</span>
+                              <span className="text-sm text-slate-600 font-bold">{formatCurrency(row.amount)}</span>
                             </td>
                             <td className="px-6 py-4">
                               <div className="space-y-1">
@@ -495,7 +627,7 @@ export function DataImportPage() {
                   </div>
                   <button 
                     onClick={handleImport}
-                    disabled={isProcessing || data.some(r => r.status === 'dirty')}
+                    disabled={isProcessing || data.length === 0 || data.some(r => r.status === 'dirty')}
                     className="w-full py-3 bg-slate-900 text-white rounded-xl font-bold text-sm hover:bg-slate-800 transition-all flex items-center justify-center gap-2 disabled:opacity-50"
                   >
                     Confirm & Import
@@ -510,3 +642,4 @@ export function DataImportPage() {
     </motion.div>
   );
 }
+
