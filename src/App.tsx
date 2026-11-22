@@ -48,6 +48,7 @@ import { CategoryManagementModal } from './components/CategoryManagementModal';
 import { ConfirmationModal } from './components/ConfirmationModal';
 import { TopBar, SettingsSection } from './components/TopBar';
 import { dataService } from './services/dataService';
+import { Analytics } from '@vercel/analytics/react';
 import { supabase, isSupabaseConfigured } from './lib/supabase';
 import { DataRecord, BudgetCategory, Budget, Expense, Client, Account, JournalEntry } from './types';
 import { formatCurrency, parseLocalDate, formatLocalDate } from './lib/utils';
@@ -868,6 +869,7 @@ export default function App() {
           Developed by <span className="text-brand-600">Island Web Consultants</span>
         </p>
       </footer>
+      <Analytics />
     </div>
   );
 }
